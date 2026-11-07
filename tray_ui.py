@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
 ICON_YELLOW = QColor("#ffff00")
@@ -47,15 +47,15 @@ class TrayController:
         self.presets_menu = self.menu.addMenu("Выбрать пресет")
         self.presets_menu.aboutToShow.connect(self._populate_presets)
         self.menu.addSeparator()
-        self.undo_action = self.menu.addAction("Отменить  Ctrl+Z")
+        self.undo_action = self.menu.addAction("Отменить")
         self.undo_action.triggered.connect(window.undo_edit)
-        self.redo_action = self.menu.addAction("Повторить  Ctrl+Y")
+        self.redo_action = self.menu.addAction("Повторить")
         self.redo_action.triggered.connect(window.redo_edit)
         self.menu.addSeparator()
         self.configure_action = self.menu.addAction("Настроить аудиоустройство…")
         self.configure_action.triggered.connect(self._configure)
         self.menu.addSeparator()
-        self.exit_action = self.menu.addAction("Выход (отключить эквалайзер)")
+        self.exit_action = self.menu.addAction("Выход")
         self.exit_action.triggered.connect(window.request_exit)
 
         self.icon = QSystemTrayIcon(window)
@@ -114,15 +114,6 @@ class TrayController:
         self.redo_action.setEnabled(self.window.history.can_redo)
         self.icon.setIcon(build_tray_icon(enabled))
         self.icon.setToolTip("Yandex Music EQ — " + ("включён" if enabled else "выключен"))
-
-    def notify_hidden(self):
-        self.icon.showMessage(
-            "Yandex Music EQ",
-            "Окно скрыто. Эквалайзер продолжает работать. "
-            "Для полного выхода используйте «Выход» в меню значка.",
-            QSystemTrayIcon.MessageIcon.Information,
-            3500,
-        )
 
     def hide(self):
         self.icon.hide()
