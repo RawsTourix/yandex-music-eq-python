@@ -8,7 +8,7 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, Signal, QProcess
+from PySide6.QtCore import Qt, QTimer, Signal, QProcess, QThread
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QHBoxLayout, QLabel, QMainWindow,
@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 import apo
+import installer
 from equalizer import (
     SETTINGS_FILE, Settings, load_custom, load_library, load_settings,
     preset_settings, save_settings,
@@ -136,6 +137,19 @@ class Switch(QWidget):
         p.drawEllipse(19 if self.checked else 3, 5, 16, 16)
 
 
+class InstallerDownloadWorker(QThread):
+    progress_changed = Signal(int)
+    download_ready = Signal(str)
+    download_error = Signal(str)
+
+    def run(self):
+        try:
+            path = installer.download_official_installer(self.progress_changed.emit)
+            self.download_ready.emit(str(path))
+        except (installer.InstallerError, OSError) as exc:
+            self.download_error.emit(str(exc))
+
+
 class Window(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -213,7 +227,7 @@ class Window(QMainWindow):
         bottom.addWidget(self.status)
         bottom.addStretch(1)
         self.setup_button = QPushButton("Подключить APO")
-        self.setup_button.clicked.connect(self.setup_apo)
+        self.setup_button.clicked.connect(self.handle_setup_button)
         bottom.addWidget(self.setup_button)
         layout.addLayout(bottom)
         self.messages = QPlainTextEdit()
@@ -233,6 +247,7 @@ class Window(QMainWindow):
         self.write_timer.timeout.connect(self.commit_settings)
         self.connected = False
         self.setup_process = None
+        self.install_worker = None
         self.connection_timer = QTimer(self)
         self.connection_timer.timeout.connect(self.check_connection)
         self.connection_timer.start(2000)
@@ -251,15 +266,21 @@ class Window(QMainWindow):
             self.connected = connected
             if connected:
                 self.schedule_write()
-        self.status.setText("APO: конфигурация OK" if connected else "APO: не подключён")
-        self.setup_button.setVisible(os.name == "nt" and self.setup_process is None)
+        self.status.setText("APO: конфигурация OK" if connected else
+                            "APO: не установлен" if apo.config_directory() is None else "APO: не подключён")
+        busy = self.setup_process is not None or self.install_worker is not None
+        self.setup_button.setVisible(os.name == "nt" and (not connected or busy))
+        self.setup_button.setEnabled(not busy)
+        if not busy:
+            self.setup_button.setText("Установить APO" if apo.config_directory() is None else "Подключить APO")
 
     def startup_check(self):
         if os.name != "nt":
             self.report("Системная обработка доступна только в Windows")
             return
         if apo.config_directory() is None:
-            self.report("Equalizer APO не обнаружен. Сначала установите его и выберите устройство в Configurator")
+            self.report("Equalizer APO не обнаружен. Можно загрузить официальный установщик после подтверждения.")
+            self.offer_install()
             return
         if not self.connected:
             self.report(apo.connection_status()[1])
@@ -330,6 +351,65 @@ class Window(QMainWindow):
                 self.report("APO перестал быть подключён: проверьте config.txt и кнопку «Подключить APO»")
         except (OSError, ValueError) as exc:
             self.report(f"Эквализация не применяется: ошибка записи в APO: {exc}")
+
+    def handle_setup_button(self):
+        if apo.config_directory() is None:
+            self.offer_install()
+        else:
+            self.setup_apo()
+
+    def offer_install(self):
+        if os.name != "nt" or self.install_worker is not None or self.setup_process is not None:
+            return
+        if not installer.supported_architecture():
+            self.report("Автоустановка доступна только для Windows x64: " + installer.OFFICIAL_PAGE)
+            return
+        answer = QMessageBox.question(
+            self, "Установить Equalizer APO?",
+            "Для обработки системного звука требуется Equalizer APO.\n\n"
+            "Скачать официальный установщик версии 1.4.2 с SourceForge (около 12 МБ), "
+            "проверить SHA-256 и запустить мастер установки?\n\n"
+            "Windows запросит права администратора. В мастере нужно выбрать "
+            "аудиоустройство и затем перезагрузить Windows.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            self.report("Установка отменена. Нажмите «Установить APO», чтобы повторить.")
+            return
+        self.install_worker = InstallerDownloadWorker(self)
+        self.install_worker.progress_changed.connect(self.install_progress)
+        self.install_worker.download_ready.connect(self.install_downloaded)
+        self.install_worker.download_error.connect(self.install_failed)
+        self.install_worker.finished.connect(self.install_thread_finished)
+        self.report("Загрузка Equalizer APO 1.4.2 с SourceForge с обязательной проверкой SHA-256...")
+        self.check_connection()
+        self.setup_button.setText("Загрузка...")
+        self.install_worker.start()
+
+    def install_progress(self, percent: int):
+        self.setup_button.setText(f"Загрузка {percent}%")
+
+    def install_downloaded(self, path: str):
+        self.report("Проверка SHA-256 пройдена. Запускаю официальный мастер установки...")
+        try:
+            installer.launch_verified_installer(Path(path))
+        except installer.InstallerError as exc:
+            self.report(f"Установка не запущена: {exc}")
+            return
+        self.report("Мастер Equalizer APO запущен. Выберите нужное устройство вывода в Device Selector.")
+        self.report("После установки и перезагрузки Windows снова откройте main.pyw: подключение конфигурации выполнится автоматически.")
+
+    def install_failed(self, message: str):
+        self.report("Загрузка не удалась: " + message)
+        self.report("Официальная страница для ручной установки: " + installer.OFFICIAL_PAGE)
+
+    def install_thread_finished(self):
+        worker = self.install_worker
+        self.install_worker = None
+        if worker is not None:
+            worker.deleteLater()
+        self.check_connection()
 
     def setup_apo(self):
         if os.name != "nt":
