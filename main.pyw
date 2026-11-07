@@ -29,6 +29,36 @@ YELLOW = QColor("#ffff00")
 FREQUENCY_LABELS = ("60", "170", "310", "600", "1k", "3k", "6k", "12k", "14k", "16k")
 
 
+DIALOG_STYLE = """
+    QMessageBox { background-color: #1a1a1a; }
+    QMessageBox QLabel {
+        color: #ededed; background-color: transparent;
+        font-family: 'Segoe UI'; font-size: 13px;
+    }
+    QMessageBox QPushButton {
+        color: #ededed; background-color: #303030;
+        border: 1px solid #606060; border-radius: 6px;
+        min-width: 72px; padding: 7px 14px;
+        font-family: 'Segoe UI'; font-size: 12px; text-align: center;
+    }
+    QMessageBox QPushButton:hover, QMessageBox QPushButton:focus {
+        border-color: #ffff00;
+    }
+    QMessageBox QPushButton:default { border-color: #ffff00; }
+"""
+
+
+def make_dialog(parent: QWidget, title: str, message: str, icon: QMessageBox.Icon) -> QMessageBox:
+    """Use an explicit dialog palette; main-window label styles must not leak in."""
+    dialog = QMessageBox(parent)
+    dialog.setWindowTitle(title)
+    dialog.setTextFormat(Qt.TextFormat.PlainText)
+    dialog.setText(message)
+    dialog.setIcon(icon)
+    dialog.setStyleSheet(DIALOG_STYLE)
+    return dialog
+
+
 class BandSlider(QWidget):
     value_changed = Signal(float)
 
@@ -159,13 +189,17 @@ class Window(QMainWindow):
             self.custom = load_custom(self.library)
         except (OSError, ValueError, KeyError, TypeError) as exc:
             # Do not overwrite an invalid file silently. The user must inspect it.
-            QMessageBox.warning(self, "Некорректные настройки", f"{exc}\nЗакройте приложение и исправьте settings.json.")
+            make_dialog(
+                self, "Некорректные настройки",
+                f"{exc}\nЗакройте приложение и исправьте settings.json.",
+                QMessageBox.Icon.Warning,
+            ).exec()
             raise
         self.setWindowTitle("Yandex Music EQ — independent")
         self.setFixedSize(463, 480)
         self.setStyleSheet("""
             QMainWindow, QWidget#root { background: #1a1a1a; }
-            QLabel { color: #dedede; font-family: 'Segoe UI'; }
+            QWidget#root QLabel { color: #dedede; font-family: 'Segoe UI'; }
             QComboBox {
                 color: #e3e3e3; background: #1a1a1a; border: 1px solid #4b4b4b;
                 border-radius: 24px; padding: 11px 17px; font-size: 13px; font-weight: 600;
@@ -176,9 +210,9 @@ class Window(QMainWindow):
                 background: #272727; color: #eeeeee; border: 1px solid #4b4b4b;
                 selection-background-color: #3a3a3a; outline: 0;
             }
-            QPushButton { background: transparent; color: #9a9a9a;
+            QWidget#root QPushButton { background: transparent; color: #9a9a9a;
                           border: none; font-size: 11px; text-align: right; }
-            QPushButton:hover { color: #ffff00; }
+            QWidget#root QPushButton:hover { color: #ffff00; }
         """)
         root = QWidget()
         root.setObjectName("root")
@@ -364,16 +398,20 @@ class Window(QMainWindow):
         if not installer.supported_architecture():
             self.report("Автоустановка доступна только для Windows x64: " + installer.OFFICIAL_PAGE)
             return
-        answer = QMessageBox.question(
+        dialog = make_dialog(
             self, "Установить Equalizer APO?",
             "Для обработки системного звука требуется Equalizer APO.\n\n"
             "Скачать официальный установщик версии 1.4.2 с SourceForge (около 12 МБ), "
             "проверить SHA-256 и запустить мастер установки?\n\n"
             "Windows запросит права администратора. В мастере нужно выбрать "
             "аудиоустройство и затем перезагрузить Windows.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
+            QMessageBox.Icon.Question,
         )
+        dialog.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        dialog.setDefaultButton(QMessageBox.StandardButton.Yes)
+        dialog.button(QMessageBox.StandardButton.Yes).setText("Установить")
+        dialog.button(QMessageBox.StandardButton.No).setText("Отмена")
+        answer = dialog.exec()
         if answer != QMessageBox.StandardButton.Yes:
             self.report("Установка отменена. Нажмите «Установить APO», чтобы повторить.")
             return
