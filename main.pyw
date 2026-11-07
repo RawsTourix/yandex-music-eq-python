@@ -10,7 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, Signal, QProcess, QThread
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QPainter, QPen, QShortcut, QKeySequence
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QHBoxLayout, QLabel, QMainWindow,
     QMessageBox, QPushButton, QVBoxLayout, QWidget, QPlainTextEdit,
@@ -21,6 +21,7 @@ import apo
 import installer
 import device_status
 import user_presets as profiles
+from history import AudioState, EditHistory
 from equalizer import (
     INTENSITIES, SETTINGS_FILE, Settings, load_custom, load_library,
     load_settings, preset_settings, save_settings,
@@ -66,6 +67,8 @@ def make_dialog(parent: QWidget, title: str, message: str, icon: QMessageBox.Ico
 
 class BandSlider(QWidget):
     value_changed = Signal(float)
+    edit_started = Signal()
+    edit_finished = Signal()
 
     def __init__(self, label: str, minimum: float, maximum: float, value: float, width: int = 31):
         super().__init__()
@@ -95,7 +98,13 @@ class BandSlider(QWidget):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
+            self.edit_started.emit()
             self._from_y(event.position().y())
+            event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.edit_finished.emit()
             event.accept()
 
     def mouseMoveEvent(self, event):
@@ -243,6 +252,8 @@ class Window(QMainWindow):
         sliders.setSpacing(0)
         self.preamp = BandSlider("уровень", .5, 1.5, self.settings.preamp_linear, width=51)
         self.preamp.value_changed.connect(self.edit_preamp)
+        self.preamp.edit_started.connect(self.begin_slider_edit)
+        self.preamp.edit_finished.connect(self.end_slider_edit)
         self.preamp_intensity_button = self.make_intensity_button(
             None, "предусиление", self.settings.preamp_intensity, 51,
         )
@@ -255,6 +266,8 @@ class Window(QMainWindow):
         for index, name in enumerate(FREQUENCY_LABELS):
             slider = BandSlider(name, -12, 12, self.settings.gains_db[index])
             slider.value_changed.connect(lambda value, i=index: self.edit_band(i, value))
+            slider.edit_started.connect(self.begin_slider_edit)
+            slider.edit_finished.connect(self.end_slider_edit)
             button = self.make_intensity_button(
                 index, f"{name} Гц", self.settings.band_intensities[index], 31,
             )
@@ -276,19 +289,6 @@ class Window(QMainWindow):
         self.refresh_preset_items(self.settings.preset_id)
         self.preset.currentIndexChanged.connect(self.choose_preset)
         preset_row.addWidget(self.preset, stretch=1)
-        self.preset_save_button = QPushButton("Сохранить")
-        self.preset_save_button.setFixedSize(81, 36)
-        self.preset_save_button.setStyleSheet("""
-            QPushButton { color: #dedede; background: #303030;
-                border: 1px solid #5b5b5b; border-radius: 9px;
-                text-align: center; font: 11px 'Segoe UI'; }
-            QPushButton:hover { border-color: #ffff00; }
-        """)
-        self.preset_save_button.setToolTip(
-            "Сохранить текущие параметры как свой пресет либо обновить выбранный"
-        )
-        self.preset_save_button.clicked.connect(self.save_current_preset)
-        preset_row.addWidget(self.preset_save_button)
         self.preset_actions = QToolButton(self)
         self.preset_actions.setText("⋯")
         self.preset_actions.setFixedSize(31, 36)
@@ -307,7 +307,14 @@ class Window(QMainWindow):
             QMenu::item:selected { background: #3d3d3d; color: #ffff00; }
             QMenu::item:disabled { color: #777777; }
         """)
-        self.action_save_as = self.preset_menu.addAction("Сохранить как…")
+        self.action_undo = self.preset_menu.addAction("Отменить\tCtrl+Z")
+        self.action_undo.triggered.connect(self.undo_edit)
+        self.action_redo = self.preset_menu.addAction("Повторить\tCtrl+Y")
+        self.action_redo.triggered.connect(self.redo_edit)
+        self.preset_menu.addSeparator()
+        self.action_save = self.preset_menu.addAction("Сохранить пресет\tCtrl+S")
+        self.action_save.triggered.connect(self.save_current_preset)
+        self.action_save_as = self.preset_menu.addAction("Сохранить как…\tCtrl+Shift+S")
         self.action_save_as.triggered.connect(self.save_preset_as)
         self.action_update = self.preset_menu.addAction("Обновить выбранный пресет")
         self.action_update.triggered.connect(self.update_user_preset)
@@ -316,15 +323,33 @@ class Window(QMainWindow):
         self.action_delete = self.preset_menu.addAction("Удалить…")
         self.action_delete.triggered.connect(self.delete_user_preset)
         self.preset_menu.addSeparator()
-        self.action_export = self.preset_menu.addAction("Экспортировать…")
+        self.action_export = self.preset_menu.addAction("Экспортировать…\tCtrl+E")
         self.action_export.triggered.connect(self.export_current_preset)
-        self.action_import = self.preset_menu.addAction("Импортировать…")
+        self.action_import = self.preset_menu.addAction("Импортировать…\tCtrl+O")
         self.action_import.triggered.connect(self.import_user_preset)
         self.preset_menu.aboutToShow.connect(self.update_preset_actions)
         self.preset_actions.setMenu(self.preset_menu)
         preset_row.addWidget(self.preset_actions)
         layout.addLayout(preset_row)
+        self.history = EditHistory(capacity=100)
+        self._slider_drag_before: AudioState | None = None
+        self._restoring_history = False
+        self.shortcuts = []
+        for combination, handler in (
+            ("Ctrl+Z", self.undo_edit),
+            ("Ctrl+Y", self.redo_edit),
+            ("Ctrl+Shift+Z", self.redo_edit),
+            ("Ctrl+S", self.save_current_preset),
+            ("Ctrl+Shift+S", self.save_preset_as),
+            ("Ctrl+E", self.export_current_preset),
+            ("Ctrl+O", self.import_user_preset),
+        ):
+            shortcut = QShortcut(QKeySequence(combination), self)
+            shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+            shortcut.activated.connect(handler)
+            self.shortcuts.append(shortcut)
         self.set_preset_dirty(self.preset_dirty)
+        self.update_history_actions()
         bottom = QHBoxLayout()
         self.status = QLabel()
         self.status.setStyleSheet("color: #848484; font-size: 11px;")
