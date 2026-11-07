@@ -41,15 +41,27 @@ def managed_file() -> Path | None:
     return (directory / MANAGED_NAME) if directory else None
 
 
-def is_connected() -> bool:
+def connection_status() -> tuple[bool, str]:
+    """Report config-file integration only; this cannot prove endpoint DSP."""
     directory = config_directory()
-    if directory is None or not (directory / MANAGED_NAME).is_file():
-        return False
+    if directory is None:
+        return False, "Equalizer APO не найден (проверьте установку)"
     main = directory / "config.txt"
     if not main.is_file():
-        return False
-    text = main.read_text(encoding="utf-8-sig", errors="replace")
-    return any(line.strip().lower() == INCLUDE_DIRECTIVE.lower() for line in text.splitlines())
+        return False, f"Отсутствует конфигурация Equalizer APO: {main}"
+    if not (directory / MANAGED_NAME).is_file():
+        return False, f"Не создан файл фильтров: {directory / MANAGED_NAME}"
+    try:
+        lines = main.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+    except OSError as exc:
+        return False, f"Не удалось прочесть config.txt: {exc}"
+    if not any(line.strip().lower() == INCLUDE_DIRECTIVE.lower() for line in lines):
+        return False, f"В {main} отсутствует строка '{INCLUDE_DIRECTIVE}'"
+    return True, "Файлы Equalizer APO подключены; аудиоустройство ещё не проверено"
+
+
+def is_connected() -> bool:
+    return connection_status()[0]
 
 
 def apply(settings: Settings, library: dict) -> bool:
