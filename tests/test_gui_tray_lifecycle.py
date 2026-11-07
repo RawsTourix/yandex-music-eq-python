@@ -60,19 +60,19 @@ class GuiTrayLifecycleTests(unittest.TestCase):
         w = self.window
         w.toggle(True)
         before = w.settings
-        notify = Mock()
         icon = SimpleNamespace(isVisible=lambda: True)
-        w.tray_controller = SimpleNamespace(icon=icon, notify_hidden=notify, refresh=Mock())
+        w.tray_controller = SimpleNamespace(icon=icon, refresh=Mock())
         self.assertTrue(w.isVisible())
         self.assertFalse(w.close())
         self.assertFalse(w.isVisible())
         self.assertEqual(w.settings, before)
         self.assertEqual(w.history.undo_count, 1)
-        notify.assert_called_once()
         w.show_window()
         self.assertTrue(w.isVisible())
         self.assertFalse(w.close())
-        notify.assert_called_once()  # tray hint only once per session
+        self.assertFalse(w.isVisible())
+        # No balloon/toast is sent on any close-to-tray transition.
+        self.assertFalse(hasattr(w.tray_controller, "notify_hidden"))
 
     def test_exit_failure_keeps_process_and_eq_running(self):
         w = self.window
@@ -112,6 +112,10 @@ class GuiTrayLifecycleTests(unittest.TestCase):
         try:
             self.assertTrue(tray.power_action.isCheckable())
             self.assertIs(tray.window, w)
+            self.assertEqual(tray.undo_action.text(), "Отменить")
+            self.assertEqual(tray.redo_action.text(), "Повторить")
+            self.assertEqual(tray.exit_action.text(), "Выход")
+            self.assertFalse(hasattr(tray, "notify_hidden"))
             tray._toggle(True)
             self.assertTrue(w.settings.enabled)
             self.assertTrue(w.switch.checked)
