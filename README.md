@@ -28,10 +28,12 @@ Run `py main.pyw` instead if you want to see Python errors in a terminal.
 ### One-time Equalizer APO connection
 
 1. Install Equalizer APO and enable the *correct playback device* using its **Configurator**.
-2. Start `main.pyw`, and click **«Подключить APO»** at the bottom. Alternatively, from PowerShell run `py setup_apo.py`.
+2. Start `main.pyw`. If Equalizer APO is found but is not connected (or its managed file is not writable), the app **automatically requests UAC once** to perform setup. You can also click **«Подключить APO»** to retry. Alternatively, from PowerShell run `py setup_apo.py`.
 3. Approve the **Windows UAC** prompt. The setup helper creates `EqualizerAPO/config/yandex-music-eq.txt`, appends a scoped `Device: all`, `Stage: post-mix`, `Channel: all` block with `Include: yandex-music-eq.txt` to `config.txt`, and grants **your Windows account Modify permission on the generated file only**. It backs up `config.txt` before the first modification and does not remove other filters. You should inspect any existing filters in Equalizer APO's Configuration Editor so they do not stack unexpectedly.
-4. Check the GUI status: **«APO: файл подключён»**. This means the include is connected, **not** that audio processing on your endpoint has been independently verified.
+4. Check the GUI status: **«APO: конфигурация OK»**. This means the managed include exists and can be found. **It does not prove** that processing is active for the selected playback device. The read-only diagnostic textbox below the controls displays setup progress and errors, including UAC denial and file permissions.
 5. Toggle the EQ on, adjust bands, and verify the result with music or a test tone using a normal shared-mode Windows audio device. Changes are written automatically after a short pause; closing the GUI does not disable the last selected EQ state.
+
+If the UI says **«конфигурация OK»** but sound still does not change, open **Equalizer APO Configurator**, select the actual Windows playback endpoint (e.g. your USB DAC, not another output), install the APO for that device, and restart Windows if prompted. Check that sound is using shared mode rather than ASIO/WASAPI Exclusive. A UAC prompt only grants permission to configure files; it cannot install the audio-processing endpoint in your place.
 
 If your setup requires custom install paths or ACL restrictions block access, use Equalizer APO's Configuration Editor to manage the include manually. The GUI intentionally does **not** overwrite your whole `config.txt`.
 
@@ -42,7 +44,7 @@ project/
   main.pyw                 # minimal GUI
   equalizer.py             # validated settings + DSP coefficients / APO config generation
   apo.py                   # Equalizer APO integration
-  setup_apo.py             # one-time elevated setup only
+  setup_apo.py             # one-time elevated setup with status reporting
   presets.json             # built-in presets; tracked in Git
   settings.json            # auto-created local custom settings; not tracked
   requirements.txt
@@ -59,7 +61,7 @@ No hardware or PySide6 needed:
 py -m unittest discover -s tests -v
 ```
 
-These cover preset validation, config generation, IIR biquad response at reference frequencies, fallback, and settings persistence. Windows GUI + APO live-output testing must be performed on a Windows machine.
+These cover preset validation, config generation, IIR biquad response at reference frequencies, fallback, settings persistence, and integration-status diagnostics. Windows GUI + APO live-output testing must be performed on a Windows machine.
 
 ## Reference
 
