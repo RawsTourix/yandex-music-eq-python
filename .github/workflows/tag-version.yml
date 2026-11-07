@@ -1,0 +1,37 @@
+name: Tag version on release merge
+
+on:
+  push:
+    branches: [main]
+    paths: [VERSION]
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the released commit
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 1
+      - name: Create immutable annotated version tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(tr -d '\r\n ' < VERSION)"
+          if [[ ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid VERSION value: $version"
+            exit 1
+          fi
+          if git ls-remote --tags --refs origin "refs/tags/$version" | grep -q .; then
+            echo "::error::Tag $version already exists; will not overwrite it."
+            exit 1
+          fi
+          git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              tag -a "$version" "$GITHUB_SHA" -m "Release $version"
+          git push origin "refs/tags/$version"
+          echo "Created $version on $GITHUB_SHA"
