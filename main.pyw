@@ -385,7 +385,6 @@ class Window(QMainWindow):
         self.connection_timer.start(2000)
         self.check_connection()
         self._exit_completed = False
-        self._tray_tip_shown = False
         self.tray_controller = None
         app = QApplication.instance()
         if app.platformName().lower() != "offscreen" and QSystemTrayIcon.isSystemTrayAvailable():
@@ -1213,9 +1212,6 @@ class Window(QMainWindow):
                 self.commit_settings()
             event.ignore()
             self.hide()
-            if not self._tray_tip_shown:
-                self._tray_tip_shown = True
-                self.tray_controller.notify_hidden()
             return
         # When no system tray is available, closing the sole window must
         # perform a proper shutdown rather than strand filters in the APO.
