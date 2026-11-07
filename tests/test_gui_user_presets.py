@@ -87,7 +87,8 @@ class GuiUserPresetTests(unittest.TestCase):
         window.edit_band(0, original + 1)
         self.assertTrue(window.preset_dirty)
         self.assertEqual(window.settings.preset_id, user_id)
-        self.assertIn("*", window.preset_save_button.text())
+        self.assertIn("*", window.preset.currentText())
+        self.assertIn("Сохранить изменения", window.action_save.text())
         self.assertEqual(window.user_presets[user_id]["gainsDb"][0], original)
         with patch.object(QMessageBox, "exec", return_value=QMessageBox.StandardButton.Cancel):
             window.preset.setCurrentIndex(window.preset.findData("TECHNO"))
