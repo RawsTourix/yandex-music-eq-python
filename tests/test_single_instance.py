@@ -1,19 +1,15 @@
-"""Windows named mutex and local activation of the existing instance."""
+"""Windows mutex and native event ensure one interactive-session instance."""
 from __future__ import annotations
 
 import os
-import threading
-import time
 import unittest
 
-from PySide6.QtCore import QCoreApplication
-
 from single_instance import (
-    ActivationServer, WindowsInstanceMutex, notify_running_instance,
+    ActivationEvent, WindowsInstanceMutex, notify_running_instance,
 )
 
 
-@unittest.skipUnless(os.name == "nt", "Windows mutex and named-pipe tests")
+@unittest.skipUnless(os.name == "nt", "Windows-only kernel synchronization")
 class SingleInstanceTests(unittest.TestCase):
     def test_mutex_rejects_second_instance_and_releases(self):
         first, second, third = WindowsInstanceMutex(), WindowsInstanceMutex(), WindowsInstanceMutex()
@@ -27,31 +23,24 @@ class SingleInstanceTests(unittest.TestCase):
             first.release()
             second.release()
 
-    def test_second_launch_requests_existing_window(self):
-        app = QCoreApplication.instance()
-        created = app is None
-        if created:
-            app = QCoreApplication([])
-        calls = []
-        server = ActivationServer(lambda: calls.append("show"))
+    def test_second_launch_signals_existing_instance(self):
+        # Simulates two processes with independent handles to the same
+        # named Windows event: no reliance on Qt event-loop timing.
+        primary = ActivationEvent()
         try:
-            server.start()
-            # A second process has its own event loop/thread. Sending from this
-            # test's GUI thread would block the server's event loop during the
-            # synchronous waitForConnected/waitForBytesWritten calls.
-            responses = []
-            second = threading.Thread(target=lambda: responses.append(notify_running_instance()))
-            second.start()
-            deadline = time.monotonic() + 4
-            while time.monotonic() < deadline and (second.is_alive() or not calls):
-                app.processEvents()
-                time.sleep(.005)
-            second.join(timeout=2)
-            self.assertFalse(second.is_alive())
-            self.assertEqual(responses, [True])
-            self.assertEqual(calls, ["show"])
+            primary.create()
+            self.assertFalse(primary.consume())
+            self.assertTrue(notify_running_instance())
+            self.assertTrue(primary.consume())
+            self.assertFalse(primary.consume())  # auto-reset semantics
         finally:
-            server.close()
+            primary.close()
+
+    def test_closed_event_no_longer_reported_active(self):
+        event = ActivationEvent()
+        event.create()
+        event.close()
+        self.assertFalse(event.consume())
 
 
 if __name__ == "__main__":
