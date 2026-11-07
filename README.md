@@ -8,11 +8,23 @@
 
 - Ten filters in series: **60 Hz low shelf**, **170, 310, 600, 1000, 3000, 6000, 12000, 14000 Hz peaking**, **16000 Hz high shelf**.
 - Q = 1 for peaking filters. Web Audio ignores Q for shelf filters (implemented with shelf slope S = 1).
-- Individual gains **-12 to +12 dB**, **0.1 dB** steps. Separate *linear* preamp **0.5 to 1.5**, **0.1** steps.
+- Individual gains **-12 to +12 dB**, **0.1 dB** steps. Separate *linear* preamp **0.5 to 1.5**, **0.1** steps. The intensity selector changes the processing chain, not the displayed slider ranges.
 - **19 presets** extracted as numerical settings from user-provided Yandex Music JS, stored in [`presets.json`](presets.json) beside the Python code. Custom values and app state are stored locally in `settings.json` (ignored by Git).
 - Uses Equalizer APO `IIR Order 2` filters with RBJ/Web Audio-style coefficient formulas for **44.1, 48, 88.2, 96, 176.4 and 192 kHz**. For other sample rates, falls back to its built-in LS/PK/HS filters, which may differ from browser DSP.
 - **Bit-perfect equivalence to Chrome/Web Audio has not yet been demonstrated**. Differences are possible from DSP implementation, timing, sample rate, clipping, Windows audio effects, and other APO configuration. Comparison against measured browser response is a future validation step.
 - Python is only the **GUI/controller**: it cannot intercept arbitrary Windows audio itself. Equalizer APO must be installed and registered on the intended playback endpoint. ASIO and WASAPI exclusive streams can bypass this path.
+
+
+## Intensity / serial stacking (experimental)
+
+The GUI adds a compact **«Интенсивность»** selector: `×0.25`, `×0.5`, `×1`, `×2`, `×4`. It is **independent** of the preset choice and slider positions; selecting an intensity does not change the original 19 preset files or turn a preset into Custom. The selected value is stored in `settings.json` as `intensity`; pre-existing settings without that field default to `1.0`.
+
+- **×1**: original model, unchanged.
+- **×2 / ×4**: actually repeat the same ten-filter Web Audio-modeled **biquad chain** two/four times in series (skipping unity gain stages), rather than converting a +6 dB band into a single +12/+24 dB biquad. A single amplified biquad can have a different frequency response and phase. The linear preamp is compounded as `preampLinear ** intensity`; it can be implemented as an equivalent overall gain since scalar gains commute with linear filters.
+- **×0.5 / ×0.25**: approximate a weaker EQ by scaling each band's gain in dB and taking `preampLinear ** intensity`. These fractional modes are *not* the true complex transfer-function power `H(f) ** intensity`, so frequency response and phase may differ from a mathematically exact fractional cascade.
+- With ×4, four stages of +12 dB can yield +48 dB at a band center, potentially **much more in overlapping bands**. Such processing can cause severe clipping or hearing risk at high playback levels. **Turn listening volume down before testing** and consider reducing the preamp. There is deliberately no automatic normalization/limiter, since that would change the intended sound.
+
+Note: even ×2 with one Yandex Music browser EQ and one system EQ is an ideal mathematical cascade only when the two DSP implementations and sample-rate conditions are equivalent; this has not yet been measured.
 
 ## Run on Windows 10/11
 
