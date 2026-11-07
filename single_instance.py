@@ -26,13 +26,13 @@ def _kernel32():
     if os.name != "nt":
         raise InstanceError("Управление единственным экземпляром поддерживается в Windows")
     dll = ctypes.WinDLL("kernel32", use_last_error=True)
-    dll.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+    dll.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
     dll.CreateMutexW.restype = ctypes.c_void_p
     dll.CreateEventW.argtypes = [
-        ctypes.c_void_p, ctypes.c_bool, ctypes.c_bool, ctypes.c_wchar_p,
+        ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_wchar_p,
     ]
     dll.CreateEventW.restype = ctypes.c_void_p
-    dll.OpenEventW.argtypes = [ctypes.c_ulong, ctypes.c_bool, ctypes.c_wchar_p]
+    dll.OpenEventW.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_wchar_p]
     dll.OpenEventW.restype = ctypes.c_void_p
     dll.SetEvent.argtypes = [ctypes.c_void_p]
     dll.SetEvent.restype = ctypes.c_bool
