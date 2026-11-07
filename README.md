@@ -52,7 +52,7 @@ project/
   tests/
 ```
 
-The downloaded vendor installer (when requested) is cached in the Windows temporary directory and is never committed to Git. The automatic download pins official x64 version 1.4.2, not an unverified latest installer. The install wizard still requires user input and a system restart or audio service restart. If SourceForge mirrors are unreachable or block programmatic downloads, the app prints the official download page in its message area so you can install manually.
+The downloaded vendor installer (when requested) is cached in the Windows temporary directory and is never committed to Git. The automatic download pins official x64 version 1.4.2, not an unverified latest installer. The install wizard still requires user input and a system restart or audio service restart. If the first download returns HTML instead of an EXE, or the published checksum does not match, the app discards the untrusted file and retries through official SourceForge mirror hosts. Each candidate must pass the same pinned SHA-256 check; none can bypass verification. If all mirrors fail or block programmatic downloads, the diagnostic area shows the server and error for each attempt and links the official files page for manual installation.
 
 The live **generated** filter file is in the Equalizer APO `config` directory, because its file watcher tracks files there. The original presets remain in the repository root.
 
