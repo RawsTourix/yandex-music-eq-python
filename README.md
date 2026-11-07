@@ -34,10 +34,20 @@ Even two separate browser/system EQs are equivalent to the modeled cascade only 
 Create your own named presets directly in the GUI without modifying the built-in Yandex Music `presets.json`. The selector includes your entries marked with **★**.
 
 1. Configure the preamp, all ten bands, and their **eleven individual intensity multipliers**. These values are automatically retained in the current local `settings.json` even before you name the preset.
-2. Click **«Сохранить»** beside the preset selector, enter a name such as **Super Bass**, and the complete configuration is saved in **`user_presets.json`** in the project directory. Select it later from the main dropdown to restore the exact original slider positions and multipliers.
-3. For an existing user preset, edit any slider or intensity. The button becomes **«Сохранить*»** until you explicitly update that saved profile. Switching presets with unsaved edits asks whether to save, discard, or cancel.
-4. Use the **⋯** menu beside the preset selector for **«Сохранить как…»**, **«Обновить выбранный пресет»**, **«Переименовать…»**, **«Удалить…»**, **«Экспортировать…»**, and **«Импортировать…»**. Built-in presets cannot be renamed or deleted.
+2. Open the **⋯** menu beside the preset selector and choose **«Сохранить пресет»** (or press **Ctrl+S**). Give your preset a name such as **Super Bass**. The complete configuration is saved in **`user_presets.json`** in the project directory. Select it later from the main dropdown to restore the exact original slider positions and multipliers.
+3. For an existing user preset, edit any slider or intensity. The selected preset name gains a **`*`** until you explicitly save changes using **⋯ → «Сохранить изменения»** or **Ctrl+S**. Switching presets with unsaved edits asks whether to save, discard, or cancel.
+4. The **⋯** menu contains **Save**, **Save As**, **Rename**, **Delete**, **Export**, **Import**, **Undo**, and **Redo** actions. Built-in presets cannot be renamed or deleted. The separate Save button has been removed so the preset dropdown keeps its width.
 5. Export the current configuration as a portable **`.yeq.json`** file, and import such a file on another installation. Import never silently overwrites existing profiles and does not change the currently playing sound; select the newly imported preset in the dropdown to apply it.
+
+## Keyboard shortcuts and audio history
+
+The program keeps a bounded history of the last **100 sound edits**. **Ctrl+Z** undoes a change; **Ctrl+Y** or **Ctrl+Shift+Z** redoes it. Both actions are also available in the **⋯** menu, with disabled states when unavailable.
+
+- Undo/redo covers changes to the preamp slider, each of the ten EQ sliders, all eleven intensity multipliers, the selected preset, and the EQ on/off switch. It restores the Custom preset state and updates Equalizer APO's generated config.
+- One continuous mouse drag is **one undo action**, instead of a separate action for every intermediate value. Mouse wheel adjustments are individual steps.
+- After undoing, editing another value clears the redo branch. Undo history lives in memory for the current app session, not in the `settings.json` file.
+- **Ctrl+S** saves the selected user preset's changes, or opens Save As for a built-in/Custom preset. **Ctrl+Shift+S** always opens Save As. **Ctrl+E** exports the current settings to `.yeq.json`; **Ctrl+O** imports a file.
+- Undo/redo handles **live audio edits**, not file operations: exporting, importing, renaming, or saving a user preset is not reverted by Ctrl+Z. Deleting a named preset clears history to avoid resurrecting deleted profile IDs.
 
 User presets save the linear preamp, ten gains in dB, one preamp multiplier, and ten band multipliers. The EQ on/off switch is intentionally *not* part of a preset and retains its current global state. The local user-preset collection and exported `.yeq.json` files are ignored by Git; **back up or copy your exported preset files to preserve them across computers or reinstallations**. An older `settings.json` remains valid, and if a selected user profile is deleted outside the app, the live audio settings are retained as Custom.
 
