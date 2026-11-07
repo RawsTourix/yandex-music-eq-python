@@ -20,8 +20,8 @@ import apo
 import installer
 import device_status
 from equalizer import (
-    SETTINGS_FILE, Settings, load_custom, load_library, load_settings,
-    preset_settings, save_settings,
+    INTENSITIES, SETTINGS_FILE, Settings, load_custom, load_library,
+    load_settings, preset_settings, save_settings,
 )
 
 BG = QColor("#1a1a1a")
@@ -198,7 +198,7 @@ class Window(QMainWindow):
             ).exec()
             raise
         self.setWindowTitle("Yandex Music EQ — independent")
-        self.setFixedSize(463, 480)
+        self.setFixedSize(463, 516)
         self.setStyleSheet("""
             QMainWindow, QWidget#root { background: #1a1a1a; }
             QWidget#root QLabel { color: #dedede; font-family: 'Segoe UI'; }
@@ -257,6 +257,28 @@ class Window(QMainWindow):
         self.preset.setCurrentIndex(self.preset.findData(self.settings.preset_id))
         self.preset.currentIndexChanged.connect(self.choose_preset)
         layout.addWidget(self.preset)
+        intensity_row = QHBoxLayout()
+        intensity_label = QLabel("Интенсивность")
+        intensity_label.setStyleSheet("color: #a4a4a4; font-size: 12px; font-weight: 600;")
+        intensity_row.addWidget(intensity_label)
+        intensity_row.addStretch(1)
+        self.intensity_combo = QComboBox()
+        self.intensity_combo.setFixedSize(112, 35)
+        self.intensity_combo.setToolTip(
+            "×2 и ×4 — последовательные копии эквалайзера; "
+            "×0.5 и ×0.25 — приближённое ослабление обработки."
+        )
+        self.intensity_combo.setStyleSheet(
+            "QComboBox { border-radius: 13px; padding: 5px 12px; font-size: 12px; }"
+        )
+        for value in INTENSITIES:
+            self.intensity_combo.addItem(f"×{value:g}", value)
+        self.intensity_combo.setCurrentIndex(
+            self.intensity_combo.findData(self.settings.intensity)
+        )
+        self.intensity_combo.currentIndexChanged.connect(self.change_intensity)
+        intensity_row.addWidget(self.intensity_combo)
+        layout.addLayout(intensity_row)
         bottom = QHBoxLayout()
         self.status = QLabel()
         self.status.setStyleSheet("color: #848484; font-size: 11px;")
@@ -373,6 +395,19 @@ class Window(QMainWindow):
         self.settings = replace(self.settings, enabled=enabled)
         self.schedule_write()
 
+    def change_intensity(self, index: int):
+        value = self.intensity_combo.itemData(index)
+        if value is None:
+            return
+        self.settings = replace(self.settings, intensity=float(value))
+        # Intensity is independent of the selected Yandex Music preset and
+        # of the slider positions. Do not switch to CUSTOM.
+        if value >= 2:
+            self.report(f"Интенсивность ×{value:g}: {int(value)} последовательные цепочки фильтров. Осторожно: возможно клиппирование.")
+        elif value < 1:
+            self.report(f"Интенсивность ×{value:g}: приближённое ослабление, не точная дробная копия DSP.")
+        self.schedule_write()
+
     def edit_preamp(self, value: float):
         self.settings = replace(self.settings, preset_id="CUSTOM", preamp_linear=value)
         self.custom = replace(self.settings, enabled=False)
@@ -397,9 +432,13 @@ class Window(QMainWindow):
         if not name:
             return
         if name == "CUSTOM":
-            self.settings = replace(self.custom, enabled=self.settings.enabled)
+            self.settings = replace(self.custom, enabled=self.settings.enabled,
+                                    intensity=self.settings.intensity)
         else:
-            self.settings = preset_settings(self.library, name, enabled=self.settings.enabled)
+            self.settings = replace(
+                preset_settings(self.library, name, enabled=self.settings.enabled),
+                intensity=self.settings.intensity,
+            )
         self.preamp.set_value(self.settings.preamp_linear)
         for widget, value in zip(self.bands, self.settings.gains_db):
             widget.set_value(value)
