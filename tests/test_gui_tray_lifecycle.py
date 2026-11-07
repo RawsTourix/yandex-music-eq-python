@@ -131,6 +131,27 @@ class GuiTrayLifecycleTests(unittest.TestCase):
         finally:
             tray.hide()
 
+    def test_tray_undo_and_redo_work_with_hidden_window(self):
+        w = self.window
+        from tray_ui import TrayController
+        start = w.settings.gains_db[0]
+        w.edit_band(0, 8.0)
+        tray = TrayController(w)
+        try:
+            w.hide()
+            tray.refresh()
+            self.assertTrue(tray.undo_action.isEnabled())
+            tray.undo_action.trigger()
+            self.assertFalse(w.isVisible())
+            self.assertEqual(w.settings.gains_db[0], start)
+            tray.refresh()
+            self.assertTrue(tray.redo_action.isEnabled())
+            tray.redo_action.trigger()
+            self.assertFalse(w.isVisible())
+            self.assertEqual(w.settings.gains_db[0], 8.0)
+        finally:
+            tray.hide()
+
     def test_singleton_show_window_does_not_reset_audio(self):
         w = self.window
         w.edit_band(0, 8)
