@@ -53,20 +53,22 @@ User presets save the linear preamp, ten gains in dB, one preamp multiplier, and
 
 ## System tray, shutdown, and single instance (experimental)
 
-On a normal Windows desktop with a system notification area, pressing the window's **X** hides the GUI to the notification area (the icon may appear under **«Отображать скрытые значки»**, depending on Windows settings). **Closing the window does not turn off or stop the current equalization.** Click/double-click the yellow/grey tray icon to show the **same existing window**; no new EQ process is launched.
+On a normal Windows desktop with a system notification area, pressing the window's **X** silently hides the GUI to the notification area (the icon may appear under **«Отображать скрытые значки»**, depending on Windows settings). **No pop-up or balloon notification is displayed when hiding. Closing the window does not turn off or stop the current equalization.** Click/double-click the yellow/grey tray icon to show the **same existing window**; no new EQ process is launched.
 
 Right-click the tray icon to access:
 
 - **Показать эквалайзер** — restore the GUI;
 - **Эквалайзер включён / выключен** — toggle DSP without opening the window;
 - **Выбрать пресет** — apply any built-in or saved user preset, including its eleven intensity multipliers; unsaved user-preset changes prompt for Save/Discard/Cancel in the restored window;
-- **Отменить / Повторить** — undo or redo recent audio changes;
+- **Отменить / Повторить** — clickable menu commands that undo or redo recent audio changes; keyboard shortcuts are available only in the focused main window;
 - **Настроить аудиоустройство…** — open the window and Equalizer APO device configuration;
-- **Выход (отключить эквалайзер)** — fully shut down the program **after writing a disabled config** to Equalizer APO and saving `enabled: false` in `settings.json`.
+- **Выход** — fully shut down the program **after writing a disabled config** to Equalizer APO and saving `enabled: false` in `settings.json`.
 
 **Important:** Equalizer APO processes audio outside the Python program and normally retains the last written configuration even if the GUI disappears. Therefore **full exit explicitly writes disabled processing**, preserving all ten band settings, multipliers, saved user presets and other settings for later use. If the APO config cannot be updated, exit is blocked and the user receives a visible error. There is no silent force-exit. When the tray is unavailable, closing the only window performs a normal safe shutdown instead of hiding an inaccessible process.
 
 Only **one instance is permitted per interactive Windows session** using a named OS mutex. Launching `main.pyw` again does not open a duplicate: a named Win32 auto-reset event signals the existing instance to restore its window (checked by a lightweight Qt timer). If the first instance has not yet created the event, the second launch retries briefly; if signalling remains unavailable, it exits and explains how to find the tray icon.
+
+**Shortcut scope:** `Ctrl+Z` and `Ctrl+Y` are regular **window-local** Qt shortcuts, not global Windows hotkeys. When the GUI is hidden or another application is focused, those keys belong to that other application and do **not** change the EQ. To undo or redo without opening the GUI, right-click the tray icon and click **Отменить** or **Повторить**. Showing keyboard hints in the tray menu would imply that these combinations work globally, so the tray menu deliberately omits them. No keyboard hook or global shortcut registration is installed.
 
 A normal Qt shutdown includes best-effort cleanup. **Force-killing the process, an OS crash or loss of power cannot guarantee cleanup** because Equalizer APO is in the Windows audio service. The system tray location (visible icons versus the hidden-icons flyout) is determined by Windows, not by this application. The tray icon/menu are not auto-start services; they exist only while the Python program runs.
 
