@@ -14,6 +14,7 @@ from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QHBoxLayout, QLabel, QMainWindow,
     QMessageBox, QPushButton, QVBoxLayout, QWidget, QPlainTextEdit,
+    QToolButton, QMenu,
 )
 
 import apo
@@ -29,6 +30,7 @@ MUTED = QColor("#898989")
 RAIL = QColor("#353535")
 YELLOW = QColor("#ffff00")
 FREQUENCY_LABELS = ("60", "170", "310", "600", "1k", "3k", "6k", "12k", "14k", "16k")
+INTENSITY_LABELS = {0.25: "×¼", 0.5: "×½", 1.0: "×1", 2.0: "×2", 4.0: "×4"}
 
 
 DIALOG_STYLE = """
@@ -235,16 +237,24 @@ class Window(QMainWindow):
         sliders.setSpacing(0)
         self.preamp = BandSlider("уровень", .5, 1.5, self.settings.preamp_linear, width=51)
         self.preamp.value_changed.connect(self.edit_preamp)
-        sliders.addWidget(self.preamp)
+        self.preamp_intensity_button = self.make_intensity_button(
+            None, "предусиление", self.settings.preamp_intensity, 51,
+        )
+        sliders.addLayout(self.slider_column(self.preamp, self.preamp_intensity_button))
         sliders.addSpacing(7)
-        sliders.addWidget(Scale())
+        sliders.addWidget(Scale(), alignment=Qt.AlignmentFlag.AlignTop)
         sliders.addStretch(1)
         self.bands = []
+        self.band_intensity_buttons = []
         for index, name in enumerate(FREQUENCY_LABELS):
             slider = BandSlider(name, -12, 12, self.settings.gains_db[index])
             slider.value_changed.connect(lambda value, i=index: self.edit_band(i, value))
-            sliders.addWidget(slider)
+            button = self.make_intensity_button(
+                index, f"{name} Гц", self.settings.band_intensities[index], 31,
+            )
+            sliders.addLayout(self.slider_column(slider, button))
             self.bands.append(slider)
+            self.band_intensity_buttons.append(button)
         sliders.addStretch(1)
         layout.addLayout(sliders)
         self.preset = QComboBox()
@@ -257,28 +267,6 @@ class Window(QMainWindow):
         self.preset.setCurrentIndex(self.preset.findData(self.settings.preset_id))
         self.preset.currentIndexChanged.connect(self.choose_preset)
         layout.addWidget(self.preset)
-        intensity_row = QHBoxLayout()
-        intensity_label = QLabel("Интенсивность")
-        intensity_label.setStyleSheet("color: #a4a4a4; font-size: 12px; font-weight: 600;")
-        intensity_row.addWidget(intensity_label)
-        intensity_row.addStretch(1)
-        self.intensity_combo = QComboBox()
-        self.intensity_combo.setFixedSize(112, 35)
-        self.intensity_combo.setToolTip(
-            "×2 и ×4 — последовательные копии эквалайзера; "
-            "×0.5 и ×0.25 — приближённое ослабление обработки."
-        )
-        self.intensity_combo.setStyleSheet(
-            "QComboBox { border-radius: 13px; padding: 5px 12px; font-size: 12px; }"
-        )
-        for value in INTENSITIES:
-            self.intensity_combo.addItem(f"×{value:g}", value)
-        self.intensity_combo.setCurrentIndex(
-            self.intensity_combo.findData(self.settings.intensity)
-        )
-        self.intensity_combo.currentIndexChanged.connect(self.change_intensity)
-        intensity_row.addWidget(self.intensity_combo)
-        layout.addLayout(intensity_row)
         bottom = QHBoxLayout()
         self.status = QLabel()
         self.status.setStyleSheet("color: #848484; font-size: 11px;")
@@ -395,17 +383,70 @@ class Window(QMainWindow):
         self.settings = replace(self.settings, enabled=enabled)
         self.schedule_write()
 
-    def change_intensity(self, index: int):
-        value = self.intensity_combo.itemData(index)
-        if value is None:
-            return
-        self.settings = replace(self.settings, intensity=float(value))
-        # Intensity is independent of the selected Yandex Music preset and
-        # of the slider positions. Do not switch to CUSTOM.
+    @staticmethod
+    def slider_column(slider: BandSlider, control: QToolButton) -> QVBoxLayout:
+        column = QVBoxLayout()
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(2)
+        column.addWidget(slider)
+        column.addWidget(control, alignment=Qt.AlignmentFlag.AlignHCenter)
+        return column
+
+    def make_intensity_button(self, band: int | None, name: str,
+                              factor: float, width: int) -> QToolButton:
+        """Compact multiplier directly beneath its own gain/band slider."""
+        button = QToolButton(self)
+        button.setFixedSize(width, 25)
+        button.setText(INTENSITY_LABELS[factor])
+        button.setAccessibleName(f"Интенсивность: {name}")
+        button.setToolTip(f"Интенсивность {name}: ×{factor:g}. Нажмите для выбора.")
+        button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        button.setStyleSheet("""
+            QToolButton {
+                color: #dedede; background: #292929; font: 9px 'Segoe UI';
+                border: 1px solid #494949; border-radius: 5px; padding: 1px;
+            }
+            QToolButton:hover { border-color: #ffff00; }
+            QToolButton::menu-indicator { image: none; width: 0px; }
+        """)
+        menu = QMenu(button)
+        menu.setMinimumWidth(102)
+        menu.setStyleSheet("""
+            QMenu { color: #eeeeee; background: #282828; border: 1px solid #555; }
+            QMenu::item { padding: 6px 16px; }
+            QMenu::item:selected { color: #ffff00; background: #3a3a3a; }
+        """)
+        for mode in INTENSITIES:
+            action = menu.addAction(f"×{mode:g}")
+            action.setData(mode)
+            action.setCheckable(True)
+            action.setChecked(mode == factor)
+            action.triggered.connect(
+                lambda checked=False, value=mode, target=band, widget=button:
+                self.change_intensity(target, value, widget)
+            )
+        button.setMenu(menu)
+        return button
+
+    def change_intensity(self, band: int | None, value: float,
+                         button: QToolButton):
+        if band is None:
+            self.settings = replace(self.settings, preamp_intensity=value)
+            name = "предусиления"
+        else:
+            multipliers = list(self.settings.band_intensities)
+            multipliers[band] = value
+            self.settings = replace(self.settings, band_intensities=tuple(multipliers))
+            name = f"полосы {FREQUENCY_LABELS[band]}"
+        button.setText(INTENSITY_LABELS[value])
+        button.setToolTip(f"Интенсивность {name}: ×{value:g}. Нажмите для выбора.")
+        for action in button.menu().actions():
+            action.setChecked(action.data() == value)
         if value >= 2:
-            self.report(f"Интенсивность ×{value:g}: {int(value)} последовательные цепочки фильтров. Осторожно: возможно клиппирование.")
+            self.report(f"×{value:g} для {name}: последовательное усиление. Возможен клиппинг.")
         elif value < 1:
-            self.report(f"Интенсивность ×{value:g}: приближённое ослабление, не точная дробная копия DSP.")
+            self.report(f"×{value:g} для {name}: приближённое ослабление эффекта.")
+        # Changing intensity does not alter the preset or any slider values.
         self.schedule_write()
 
     def edit_preamp(self, value: float):
@@ -432,12 +473,16 @@ class Window(QMainWindow):
         if not name:
             return
         if name == "CUSTOM":
-            self.settings = replace(self.custom, enabled=self.settings.enabled,
-                                    intensity=self.settings.intensity)
+            self.settings = replace(
+                self.custom, enabled=self.settings.enabled,
+                preamp_intensity=self.settings.preamp_intensity,
+                band_intensities=self.settings.band_intensities,
+            )
         else:
             self.settings = replace(
                 preset_settings(self.library, name, enabled=self.settings.enabled),
-                intensity=self.settings.intensity,
+                preamp_intensity=self.settings.preamp_intensity,
+                band_intensities=self.settings.band_intensities,
             )
         self.preamp.set_value(self.settings.preamp_linear)
         for widget, value in zip(self.bands, self.settings.gains_db):
