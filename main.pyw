@@ -562,9 +562,11 @@ class Window(QMainWindow):
             return False
         if not self._write_profiles(updated):
             return False
+        before = self.audio_state()
         self.settings = replace(self.settings, preset_id=new_id)
         self.refresh_preset_items(new_id)
         self.set_preset_dirty(False)
+        self.record_audio_edit(before)
         self.commit_settings()
         self.report(f"Сохранён пользовательский пресет «{name}» со всеми 11 множителями.")
         return True
@@ -635,6 +637,10 @@ class Window(QMainWindow):
         self.custom = replace(self.settings, enabled=False)
         self.refresh_preset_items("CUSTOM")
         self.set_preset_dirty(False)
+        # A deleted profile may be referenced by older snapshots. Treat file
+        # deletion as an undo-history boundary, not an undoable DSP edit.
+        self.history.clear()
+        self.update_history_actions()
         self.commit_settings()
         self.report(f"Пресет «{name}» удалён. Текущий звук сохранён.")
 
@@ -896,6 +902,7 @@ class Window(QMainWindow):
         name = self.preset.itemData(index)
         if not name or name == self.settings.preset_id:
             return
+        before = self.audio_state()
         if self.preset_dirty and self._current_user_id():
             current = self.user_presets[self.settings.preset_id]["name"]
             dialog = make_dialog(
@@ -942,7 +949,8 @@ class Window(QMainWindow):
         for widget, value in zip(self.bands, self.settings.gains_db):
             widget.set_value(value)
         self.reflect_intensity_widgets()
-        self.set_preset_dirty(False)
+        self.sync_preset_dirty()
+        self.record_audio_edit(before)
         self.schedule_write()
 
     def commit_settings(self):
