@@ -316,8 +316,6 @@ class Window(QMainWindow):
         self.action_save.triggered.connect(self.save_current_preset)
         self.action_save_as = self.preset_menu.addAction("Сохранить как…\tCtrl+Shift+S")
         self.action_save_as.triggered.connect(self.save_preset_as)
-        self.action_update = self.preset_menu.addAction("Обновить выбранный пресет")
-        self.action_update.triggered.connect(self.update_user_preset)
         self.action_rename = self.preset_menu.addAction("Переименовать…")
         self.action_rename.triggered.connect(self.rename_user_preset)
         self.action_delete = self.preset_menu.addAction("Удалить…")
@@ -437,7 +435,7 @@ class Window(QMainWindow):
 
     def update_preset_actions(self):
         available = self._current_user_id() is not None
-        for action in (self.action_update, self.action_rename, self.action_delete):
+        for action in (self.action_rename, self.action_delete):
             action.setEnabled(available)
         self.update_history_actions()
 
