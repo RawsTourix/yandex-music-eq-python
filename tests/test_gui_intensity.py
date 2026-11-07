@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import sys
 import unittest
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
@@ -23,11 +24,15 @@ except ImportError:
 class GuiIntensityTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        filename = Path(__file__).resolve().parent.parent / "main.pyw"
-        loader = SourceFileLoader("eq_gui_for_tests", str(filename))
-        spec = importlib.util.spec_from_loader(loader.name, loader)
-        gui = importlib.util.module_from_spec(spec)
-        loader.exec_module(gui)
+        name = "eq_gui_for_tests"
+        gui = sys.modules.get(name)
+        if gui is None:
+            filename = Path(__file__).resolve().parent.parent / "main.pyw"
+            loader = SourceFileLoader(name, str(filename))
+            spec = importlib.util.spec_from_loader(loader.name, loader)
+            gui = importlib.util.module_from_spec(spec)
+            sys.modules[name] = gui
+            loader.exec_module(gui)
         cls.gui = gui
         cls.app = QApplication.instance() or QApplication([])
 
