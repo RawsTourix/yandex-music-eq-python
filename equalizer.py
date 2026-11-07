@@ -105,10 +105,16 @@ def preset_settings(library: dict, preset_id: str, *, enabled: bool) -> Settings
                                "gainsDb": preset["gainsDb"]}, library["frequenciesHz"])
 
 
-def load_settings(library: dict, path: Path = SETTINGS_FILE) -> Settings:
+def load_settings(library: dict, path: Path = SETTINGS_FILE,
+                  user_preset_ids=()) -> Settings:
     if path.exists():
         result = Settings.from_dict(json.loads(path.read_text(encoding="utf-8")), library["frequenciesHz"])
-        if result.preset_id not in library["presets"]:
+        if result.preset_id not in library["presets"] and result.preset_id not in user_preset_ids:
+            # The selected user preset may have been deleted or moved.
+            # Keep the live sound settings; fall back to unsaved Custom.
+            if result.preset_id.startswith("USER:"):
+                return Settings(result.enabled, "CUSTOM", result.preamp_linear,
+                                result.gains_db, result.preamp_intensity, result.band_intensities)
             raise SettingsError(f"unknown preset: {result.preset_id}")
         return result
     return preset_settings(library, "DEFAULT", enabled=False)
