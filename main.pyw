@@ -14,12 +14,13 @@ from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QHBoxLayout, QLabel, QMainWindow,
     QMessageBox, QPushButton, QVBoxLayout, QWidget, QPlainTextEdit,
-    QToolButton, QMenu,
+    QToolButton, QMenu, QInputDialog, QFileDialog,
 )
 
 import apo
 import installer
 import device_status
+import user_presets as profiles
 from equalizer import (
     INTENSITIES, SETTINGS_FILE, Settings, load_custom, load_library,
     load_settings, preset_settings, save_settings,
@@ -189,7 +190,12 @@ class Window(QMainWindow):
         super().__init__()
         self.library = load_library()
         try:
-            self.settings = load_settings(self.library)
+            self.user_presets = profiles.load_user_presets(
+                frequencies=self.library["frequenciesHz"]
+            )
+            self.settings = load_settings(
+                self.library, user_preset_ids=self.user_presets
+            )
             self.custom = load_custom(self.library)
         except (OSError, ValueError, KeyError, TypeError) as exc:
             # Do not overwrite an invalid file silently. The user must inspect it.
@@ -257,16 +263,62 @@ class Window(QMainWindow):
             self.band_intensity_buttons.append(button)
         sliders.addStretch(1)
         layout.addLayout(sliders)
+        self.preset_dirty = False
+        preset_row = QHBoxLayout()
+        preset_row.setSpacing(6)
         self.preset = QComboBox()
         self.preset.setFixedHeight(52)
-        self.preset.addItem("Своя настройка", "CUSTOM")
-        self.preset.addItem("По умолчанию", "DEFAULT")
-        for name in self.library["presets"]:
-            if name not in ("CUSTOM", "DEFAULT"):
-                self.preset.addItem(name.replace("_", " ").title(), name)
-        self.preset.setCurrentIndex(self.preset.findData(self.settings.preset_id))
+        self.refresh_preset_items(self.settings.preset_id)
         self.preset.currentIndexChanged.connect(self.choose_preset)
-        layout.addWidget(self.preset)
+        preset_row.addWidget(self.preset, stretch=1)
+        self.preset_save_button = QPushButton("Сохранить")
+        self.preset_save_button.setFixedSize(81, 36)
+        self.preset_save_button.setStyleSheet("""
+            QPushButton { color: #dedede; background: #303030;
+                border: 1px solid #5b5b5b; border-radius: 9px;
+                text-align: center; font: 11px 'Segoe UI'; }
+            QPushButton:hover { border-color: #ffff00; }
+        """)
+        self.preset_save_button.setToolTip(
+            "Сохранить текущие параметры как свой пресет либо обновить выбранный"
+        )
+        self.preset_save_button.clicked.connect(self.save_current_preset)
+        preset_row.addWidget(self.preset_save_button)
+        self.preset_actions = QToolButton(self)
+        self.preset_actions.setText("⋯")
+        self.preset_actions.setFixedSize(31, 36)
+        self.preset_actions.setToolTip("Управление пользовательскими пресетами")
+        self.preset_actions.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.preset_actions.setStyleSheet("""
+            QToolButton { color: #dedede; background: #303030;
+                border: 1px solid #5b5b5b; border-radius: 9px; font: 18px 'Segoe UI'; }
+            QToolButton:hover { border-color: #ffff00; }
+            QToolButton::menu-indicator { image: none; width: 0; }
+        """)
+        self.preset_menu = QMenu(self.preset_actions)
+        self.preset_menu.setStyleSheet("""
+            QMenu { color: #ededed; background: #272727; border: 1px solid #555; }
+            QMenu::item { padding: 7px 16px; }
+            QMenu::item:selected { background: #3d3d3d; color: #ffff00; }
+            QMenu::item:disabled { color: #777777; }
+        """)
+        self.action_save_as = self.preset_menu.addAction("Сохранить как…")
+        self.action_save_as.triggered.connect(self.save_preset_as)
+        self.action_update = self.preset_menu.addAction("Обновить выбранный пресет")
+        self.action_update.triggered.connect(self.update_user_preset)
+        self.action_rename = self.preset_menu.addAction("Переименовать…")
+        self.action_rename.triggered.connect(self.rename_user_preset)
+        self.action_delete = self.preset_menu.addAction("Удалить…")
+        self.action_delete.triggered.connect(self.delete_user_preset)
+        self.preset_menu.addSeparator()
+        self.action_export = self.preset_menu.addAction("Экспортировать…")
+        self.action_export.triggered.connect(self.export_current_preset)
+        self.action_import = self.preset_menu.addAction("Импортировать…")
+        self.action_import.triggered.connect(self.import_user_preset)
+        self.preset_menu.aboutToShow.connect(self.update_preset_actions)
+        self.preset_actions.setMenu(self.preset_menu)
+        preset_row.addWidget(self.preset_actions)
+        layout.addLayout(preset_row)
         bottom = QHBoxLayout()
         self.status = QLabel()
         self.status.setStyleSheet("color: #848484; font-size: 11px;")
