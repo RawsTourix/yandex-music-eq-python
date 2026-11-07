@@ -409,18 +409,94 @@ class Window(QMainWindow):
         return selected if selected in self.user_presets else None
 
     def set_preset_dirty(self, dirty: bool):
+        """Show unsaved edits unobtrusively without a separate Save button."""
         self.preset_dirty = dirty
-        self.preset_save_button.setText("Сохранить*" if dirty else "Сохранить")
-        self.preset_save_button.setToolTip(
-            "Сохранить изменения в выбранном пользовательском пресете"
-            if self._current_user_id() else
-            "Сохранить текущие ползунки и все множители под новым названием"
+        selected = self._current_user_id()
+        self.action_save.setText(
+            ("Сохранить изменения" if selected else "Сохранить пресет")
+            + "\tCtrl+S"
         )
+        self.preset_actions.setToolTip(
+            "Есть несохранённые изменения профиля" if dirty
+            else "Управление пользовательскими пресетами"
+        )
+        if selected:
+            index = self.preset.findData(selected)
+            if index >= 0:
+                name = self.user_presets[selected]["name"]
+                self.preset.setItemText(index, "★ " + name + (" *" if dirty else ""))
+
+    def sync_preset_dirty(self):
+        selected = self._current_user_id()
+        dirty = bool(
+            selected and profiles.snapshot(
+                self.settings, self.user_presets[selected]["name"]
+            ) != self.user_presets[selected]
+        )
+        self.set_preset_dirty(dirty)
 
     def update_preset_actions(self):
         available = self._current_user_id() is not None
         for action in (self.action_update, self.action_rename, self.action_delete):
             action.setEnabled(available)
+        self.update_history_actions()
+
+    def audio_state(self) -> AudioState:
+        return AudioState(self.settings, self.custom)
+
+    def update_history_actions(self):
+        self.action_undo.setEnabled(self.history.can_undo)
+        self.action_redo.setEnabled(self.history.can_redo)
+
+    def record_audio_edit(self, before: AudioState):
+        if self._restoring_history or self._slider_drag_before is not None:
+            return
+        self.history.record(before, self.audio_state())
+        self.update_history_actions()
+
+    def begin_slider_edit(self):
+        if self._slider_drag_before is None:
+            self._slider_drag_before = self.audio_state()
+
+    def end_slider_edit(self):
+        if self._slider_drag_before is None:
+            return
+        before = self._slider_drag_before
+        self._slider_drag_before = None
+        self.history.record(before, self.audio_state())
+        self.update_history_actions()
+
+    def restore_audio_state(self, state: AudioState):
+        """Restore the entire live sound without creating another history entry."""
+        self._restoring_history = True
+        try:
+            self.settings, self.custom = state.settings, state.custom
+            self.switch.set_checked(self.settings.enabled)
+            self.preamp.set_value(self.settings.preamp_linear)
+            for slider, gain in zip(self.bands, self.settings.gains_db):
+                slider.set_value(gain)
+            self.reflect_intensity_widgets()
+            self.refresh_preset_items(self.settings.preset_id)
+            self.sync_preset_dirty()
+        finally:
+            self._restoring_history = False
+        self.schedule_write()
+
+    def undo_edit(self):
+        if self._slider_drag_before is not None:
+            self.end_slider_edit()
+        state = self.history.undo(self.audio_state())
+        if state is not None:
+            self.restore_audio_state(state)
+        self.update_history_actions()
+
+    def redo_edit(self):
+        if self._slider_drag_before is not None:
+            self.end_slider_edit()
+        state = self.history.redo(self.audio_state())
+        if state is not None:
+            self.restore_audio_state(state)
+        self.update_history_actions()
 
     def _preset_error(self, title: str, exception: Exception):
         message = str(exception)
@@ -715,7 +791,9 @@ class Window(QMainWindow):
         self.write_timer.start(160)
 
     def toggle(self, enabled: bool):
+        before = self.audio_state()
         self.settings = replace(self.settings, enabled=enabled)
+        self.record_audio_edit(before)
         self.schedule_write()
 
     @staticmethod
@@ -765,6 +843,7 @@ class Window(QMainWindow):
 
     def change_intensity(self, band: int | None, value: float,
                          button: QToolButton):
+        before = self.audio_state()
         if band is None:
             self.settings = replace(self.settings, preamp_intensity=value)
             name = "предусиления"
@@ -782,30 +861,31 @@ class Window(QMainWindow):
         elif value < 1:
             self.report(f"×{value:g} для {name}: приближённое ослабление эффекта.")
         # An edited user preset must be explicitly saved before replacing it.
-        if self._current_user_id():
-            self.set_preset_dirty(True)
+        self.sync_preset_dirty()
+        self.record_audio_edit(before)
         self.schedule_write()
 
     def mark_edited(self):
-        if self._current_user_id():
-            # Keep the selected user profile visible, but never overwrite its
-            # saved snapshot until the user presses Save.
-            self.set_preset_dirty(True)
-        else:
+        if not self._current_user_id():
             self.settings = replace(self.settings, preset_id="CUSTOM")
             self.custom = replace(self.settings, enabled=False)
             self.mark_custom()
+        self.sync_preset_dirty()
         self.schedule_write()
 
     def edit_preamp(self, value: float):
+        before = self.audio_state()
         self.settings = replace(self.settings, preamp_linear=value)
         self.mark_edited()
+        self.record_audio_edit(before)
 
     def edit_band(self, index: int, value: float):
+        before = self.audio_state()
         gains = list(self.settings.gains_db)
         gains[index] = value
         self.settings = replace(self.settings, gains_db=tuple(gains))
         self.mark_edited()
+        self.record_audio_edit(before)
 
     def mark_custom(self):
         self.preset.blockSignals(True)
