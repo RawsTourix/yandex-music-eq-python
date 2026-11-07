@@ -22,7 +22,7 @@ import installer
 import device_status
 import user_presets as profiles
 import lifecycle
-from single_instance import ActivationServer, InstanceError, WindowsInstanceMutex, notify_running_instance
+from single_instance import ActivationEvent, InstanceError, WindowsInstanceMutex, notify_running_instance
 from tray_ui import TrayController
 from history import AudioState, EditHistory
 from equalizer import (
@@ -1247,21 +1247,30 @@ def main():
             )
         return 0
 
-    server = None
+    activation = ActivationEvent()
+    try:
+        activation.create()
+    except InstanceError as exc:
+        mutex.release()
+        QMessageBox.critical(None, "Ошибка запуска эквалайзера", str(exc))
+        return 1
     try:
         window = Window()
-        server = ActivationServer(window.show_window)
-        try:
-            server.start()
-        except InstanceError as exc:
-            # The mutex still guarantees single-instance even without IPC.
-            window.report("Повторный запуск не сможет развернуть окно: " + str(exc))
+        activation_timer = QTimer(window)
+        def poll_activation():
+            try:
+                if activation.consume():
+                    window.show_window()
+            except InstanceError as exc:
+                activation_timer.stop()
+                window.report(str(exc))
+        activation_timer.timeout.connect(poll_activation)
+        activation_timer.start(200)
         app.aboutToQuit.connect(window.best_effort_stop_on_quit)
         window.show()
         return app.exec()
     finally:
-        if server is not None:
-            server.close()
+        activation.close()
         mutex.release()
 
 
