@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
 import unittest
 
 from PySide6.QtCore import QCoreApplication
@@ -34,11 +36,19 @@ class SingleInstanceTests(unittest.TestCase):
         server = ActivationServer(lambda: calls.append("show"))
         try:
             server.start()
-            self.assertTrue(notify_running_instance())
-            for _ in range(200):
+            # A second process has its own event loop/thread. Sending from this
+            # test's GUI thread would block the server's event loop during the
+            # synchronous waitForConnected/waitForBytesWritten calls.
+            responses = []
+            second = threading.Thread(target=lambda: responses.append(notify_running_instance()))
+            second.start()
+            deadline = time.monotonic() + 4
+            while time.monotonic() < deadline and (second.is_alive() or not calls):
                 app.processEvents()
-                if calls:
-                    break
+                time.sleep(.005)
+            second.join(timeout=2)
+            self.assertFalse(second.is_alive())
+            self.assertEqual(responses, [True])
             self.assertEqual(calls, ["show"])
         finally:
             server.close()
