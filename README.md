@@ -29,6 +29,18 @@ Instead of a single global multiplier, the GUI has **11 separate compact control
 
 Even two separate browser/system EQs are equivalent to the modeled cascade only if their actual DSP implementations and sample-rate conditions agree; that equivalence has not yet been measured.
 
+## Save, reuse, and share your own EQ presets
+
+Create your own named presets directly in the GUI without modifying the built-in Yandex Music `presets.json`. The selector includes your entries marked with **★**.
+
+1. Configure the preamp, all ten bands, and their **eleven individual intensity multipliers**. These values are automatically retained in the current local `settings.json` even before you name the preset.
+2. Click **«Сохранить»** beside the preset selector, enter a name such as **Super Bass**, and the complete configuration is saved in **`user_presets.json`** in the project directory. Select it later from the main dropdown to restore the exact original slider positions and multipliers.
+3. For an existing user preset, edit any slider or intensity. The button becomes **«Сохранить*»** until you explicitly update that saved profile. Switching presets with unsaved edits asks whether to save, discard, or cancel.
+4. Use the **⋯** menu beside the preset selector for **«Сохранить как…»**, **«Обновить выбранный пресет»**, **«Переименовать…»**, **«Удалить…»**, **«Экспортировать…»**, and **«Импортировать…»**. Built-in presets cannot be renamed or deleted.
+5. Export the current configuration as a portable **`.yeq.json`** file, and import such a file on another installation. Import never silently overwrites existing profiles and does not change the currently playing sound; select the newly imported preset in the dropdown to apply it.
+
+User presets save the linear preamp, ten gains in dB, one preamp multiplier, and ten band multipliers. The EQ on/off switch is intentionally *not* part of a preset and retains its current global state. The local user-preset collection and exported `.yeq.json` files are ignored by Git; **back up or copy your exported preset files to preserve them across computers or reinstallations**. An older `settings.json` remains valid, and if a selected user profile is deleted outside the app, the live audio settings are retained as Custom.
+
 ## Run on Windows 10/11
 
 Requires **Python 3.10+**. Equalizer APO must be enabled for your playback device in its Device Selector; it can be installed directly from this application's first-run prompt on **Windows x64**. A Windows restart may be required.
@@ -62,14 +74,16 @@ project/
   setup_apo.py             # one-time elevated config setup with status reporting
   installer.py             # opt-in official download, pinned SHA-256 check, UAC launch
   presets.json             # built-in presets; tracked in Git
-  settings.json            # auto-created local custom settings; not tracked
+  settings.json            # auto-created current sound (includes last settings)
+  user_presets.json        # local named user presets; not tracked
+  *.yeq.json               # portable exported preset files; not tracked
   requirements.txt
   tests/
 ```
 
 The downloaded vendor installer (when requested) is cached in the Windows temporary directory and is never committed to Git. The automatic download pins official x64 version 1.4.2, not an unverified latest installer. The install wizard still requires user input and a system restart or audio service restart. If the first download returns HTML instead of an EXE, or the published checksum does not match, the app discards the untrusted file and retries through official SourceForge mirror hosts. Each candidate must pass the same pinned SHA-256 check; none can bypass verification. If all mirrors fail or block programmatic downloads, the diagnostic area shows the server and error for each attempt and links the official files page for manual installation.
 
-The live **generated** filter file is in the Equalizer APO `config` directory, because its file watcher tracks files there. The original presets remain in the repository root.
+The live **generated** filter file is in the Equalizer APO `config` directory, because its file watcher tracks files there. The built-in presets remain in the repository root; your named presets live in user_presets.json.
 
 ## Tests
 
