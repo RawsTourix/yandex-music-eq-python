@@ -263,7 +263,12 @@ class Window(QMainWindow):
             self.band_intensity_buttons.append(button)
         sliders.addStretch(1)
         layout.addLayout(sliders)
-        self.preset_dirty = False
+        self.preset_dirty = (
+            self.settings.preset_id in self.user_presets and
+            profiles.snapshot(
+                self.settings, self.user_presets[self.settings.preset_id]["name"]
+            ) != self.user_presets[self.settings.preset_id]
+        )
         preset_row = QHBoxLayout()
         preset_row.setSpacing(6)
         self.preset = QComboBox()
@@ -319,6 +324,7 @@ class Window(QMainWindow):
         self.preset_actions.setMenu(self.preset_menu)
         preset_row.addWidget(self.preset_actions)
         layout.addLayout(preset_row)
+        self.set_preset_dirty(self.preset_dirty)
         bottom = QHBoxLayout()
         self.status = QLabel()
         self.status.setStyleSheet("color: #848484; font-size: 11px;")
@@ -750,22 +756,31 @@ class Window(QMainWindow):
             self.report(f"×{value:g} для {name}: последовательное усиление. Возможен клиппинг.")
         elif value < 1:
             self.report(f"×{value:g} для {name}: приближённое ослабление эффекта.")
-        # Changing intensity does not alter the preset or any slider values.
+        # An edited user preset must be explicitly saved before replacing it.
+        if self._current_user_id():
+            self.set_preset_dirty(True)
+        self.schedule_write()
+
+    def mark_edited(self):
+        if self._current_user_id():
+            # Keep the selected user profile visible, but never overwrite its
+            # saved snapshot until the user presses Save.
+            self.set_preset_dirty(True)
+        else:
+            self.settings = replace(self.settings, preset_id="CUSTOM")
+            self.custom = replace(self.settings, enabled=False)
+            self.mark_custom()
         self.schedule_write()
 
     def edit_preamp(self, value: float):
-        self.settings = replace(self.settings, preset_id="CUSTOM", preamp_linear=value)
-        self.custom = replace(self.settings, enabled=False)
-        self.mark_custom()
-        self.schedule_write()
+        self.settings = replace(self.settings, preamp_linear=value)
+        self.mark_edited()
 
     def edit_band(self, index: int, value: float):
         gains = list(self.settings.gains_db)
         gains[index] = value
-        self.settings = replace(self.settings, preset_id="CUSTOM", gains_db=tuple(gains))
-        self.custom = replace(self.settings, enabled=False)
-        self.mark_custom()
-        self.schedule_write()
+        self.settings = replace(self.settings, gains_db=tuple(gains))
+        self.mark_edited()
 
     def mark_custom(self):
         self.preset.blockSignals(True)
@@ -774,15 +789,45 @@ class Window(QMainWindow):
 
     def choose_preset(self, index: int):
         name = self.preset.itemData(index)
-        if not name:
+        if not name or name == self.settings.preset_id:
             return
+        if self.preset_dirty and self._current_user_id():
+            current = self.user_presets[self.settings.preset_id]["name"]
+            dialog = make_dialog(
+                self, "Несохранённые изменения",
+                f"Пресет «{current}» изменён. Сохранить изменения перед переключением?",
+                QMessageBox.Icon.Question,
+            )
+            dialog.setStandardButtons(
+                QMessageBox.StandardButton.Save |
+                QMessageBox.StandardButton.Discard |
+                QMessageBox.StandardButton.Cancel
+            )
+            dialog.setDefaultButton(QMessageBox.StandardButton.Save)
+            dialog.button(QMessageBox.StandardButton.Save).setText("Сохранить")
+            dialog.button(QMessageBox.StandardButton.Discard).setText("Не сохранять")
+            dialog.button(QMessageBox.StandardButton.Cancel).setText("Отмена")
+            answer = dialog.exec()
+            if answer == QMessageBox.StandardButton.Save:
+                if not self.update_user_preset():
+                    self.refresh_preset_items(self.settings.preset_id)
+                    return
+            elif answer != QMessageBox.StandardButton.Discard:
+                self.refresh_preset_items(self.settings.preset_id)
+                return
         if name == "CUSTOM":
             self.settings = replace(
                 self.custom, enabled=self.settings.enabled,
                 preamp_intensity=self.settings.preamp_intensity,
                 band_intensities=self.settings.band_intensities,
             )
+        elif name in self.user_presets:
+            # Restore the whole saved sound, including all 11 multipliers.
+            self.settings = profiles.preset_settings(
+                self.user_presets[name], name, self.settings.enabled,
+            )
         else:
+            # Built-in presets keep the user's current multiplier choices.
             self.settings = replace(
                 preset_settings(self.library, name, enabled=self.settings.enabled),
                 preamp_intensity=self.settings.preamp_intensity,
@@ -791,6 +836,8 @@ class Window(QMainWindow):
         self.preamp.set_value(self.settings.preamp_linear)
         for widget, value in zip(self.bands, self.settings.gains_db):
             widget.set_value(value)
+        self.reflect_intensity_widgets()
+        self.set_preset_dirty(False)
         self.schedule_write()
 
     def commit_settings(self):
