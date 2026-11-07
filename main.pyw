@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import sys
@@ -17,6 +18,7 @@ from PySide6.QtWidgets import (
 
 import apo
 import installer
+import device_status
 from equalizer import (
     SETTINGS_FILE, Settings, load_custom, load_library, load_settings,
     preset_settings, save_settings,
@@ -280,6 +282,8 @@ class Window(QMainWindow):
         self.write_timer.setSingleShot(True)
         self.write_timer.timeout.connect(self.commit_settings)
         self.connected = False
+        self.device_check = None
+        self.last_device_key = None
         self.setup_process = None
         self.install_worker = None
         self.connection_timer = QTimer(self)
@@ -295,18 +299,45 @@ class Window(QMainWindow):
             self.messages.appendPlainText(message)
 
     def check_connection(self):
+        # A working Include does NOT mean APO was installed on the playback
+        # endpoint. Keep these two independent states visible.
         connected, reason = apo.connection_status()
         if connected != self.connected:
             self.connected = connected
             if connected:
                 self.schedule_write()
-        self.status.setText("APO: конфигурация OK" if connected else
-                            "APO: не установлен" if apo.config_directory() is None else "APO: не подключён")
+        self.device_check = device_status.inspect_default_output() if connected else None
+        installed = apo.config_directory() is not None
+        if not installed:
+            label = "APO: не установлен"
+        elif not connected:
+            label = "APO: файл не подключён"
+        elif self.device_check.state == "missing":
+            label = "APO: выберите устройство"
+        elif self.device_check.state == "registered":
+            label = "APO: регистрация найдена"
+        else:
+            label = "APO: устройство не проверено"
+        self.status.setText(label)
+        self.status.setToolTip(self.device_check.reason if self.device_check else reason)
+        if self.device_check:
+            key = (self.device_check.state, self.device_check.device_name,
+                   self.device_check.reason)
+            if key != self.last_device_key:
+                self.last_device_key = key
+                self.report(self.device_check.reason)
+        else:
+            self.last_device_key = None
         busy = self.setup_process is not None or self.install_worker is not None
-        self.setup_button.setVisible(os.name == "nt" and (not connected or busy))
+        # Never hide the action after connecting config.txt: the user may
+        # have dismissed Device Selector without selecting an endpoint.
+        self.setup_button.setVisible(os.name == "nt")
         self.setup_button.setEnabled(not busy)
         if not busy:
-            self.setup_button.setText("Установить APO" if apo.config_directory() is None else "Подключить APO")
+            self.setup_button.setText(
+                "Установить APO" if not installed else
+                "Подключить APO" if not connected else "Настроить устройство"
+            )
 
     def startup_check(self):
         if os.name != "nt":
@@ -330,7 +361,10 @@ class Window(QMainWindow):
             self.report(f"Нет доступа к конфигурации APO: {exc}")
             self.setup_apo()
             return
-        self.report("Конфигурация APO записана. Если звук не меняется, проверьте устройство в Configurator и перезагрузите Windows")
+        self.check_connection()
+        self.report("Файл фильтров обновлён; проверка регистрации устройства выполняется отдельно.")
+        if self.device_check and self.device_check.state != "registered":
+            self.report("Нажмите «Настроить устройство», выберите текущий выход и подтвердите OK в Device Selector.")
 
     def schedule_write(self):
         self.write_timer.start(160)
@@ -389,8 +423,46 @@ class Window(QMainWindow):
     def handle_setup_button(self):
         if apo.config_directory() is None:
             self.offer_install()
-        else:
+        elif not self.connected:
             self.setup_apo()
+        else:
+            self.open_device_selector()
+
+    def open_device_selector(self):
+        """Launch the vendor GUI, never edit endpoint registry values ourselves."""
+        folder = apo.config_directory()
+        if os.name != "nt" or folder is None:
+            self.report("Equalizer APO не установлен")
+            return
+        selector = next((
+            path for path in (
+                folder.parent / "DeviceSelector.exe",
+                folder.parent / "Configurator.exe",
+            ) if path.is_file()
+        ), None)
+        if selector is None:
+            self.report("Не найден DeviceSelector.exe или Configurator.exe в папке Equalizer APO.")
+            return
+        try:
+            shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+            shell32.ShellExecuteW.argtypes = [
+                ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_wchar_p,
+                ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_int,
+            ]
+            shell32.ShellExecuteW.restype = ctypes.c_void_p
+            result = shell32.ShellExecuteW(
+                None, "runas", str(selector), None, str(selector.parent), 1
+            )
+            if not result or result <= 32:
+                if ctypes.get_last_error() == 1223:
+                    self.report("Запуск Device Selector отменён в UAC")
+                else:
+                    self.report(f"Не удалось открыть Device Selector (код {result})")
+                return
+            name = self.device_check.device_name if self.device_check else "устройство вывода"
+            self.report(f"В Device Selector отметьте «{name}», нажмите OK и перезагрузите Windows при запросе.")
+        except (OSError, ValueError) as exc:
+            self.report(f"Ошибка запуска Device Selector: {exc}")
 
     def offer_install(self):
         if os.name != "nt" or self.install_worker is not None or self.setup_process is not None:
@@ -502,7 +574,9 @@ class Window(QMainWindow):
         self.report(message)
         if success and self.connected:
             self.commit_settings()
-            self.report("Файл фильтров обновлён. В Configurator должно быть включено нужное устройство вывода")
+            self.report("Конфигурация подключена; это не подтверждает регистрацию APO на текущем устройстве.")
+            if self.device_check and self.device_check.state != "registered":
+                self.report("Нажмите «Настроить устройство» и завершите выбор устройства в Device Selector.")
         elif success:
             self.report("Установщик сообщил об успехе, но Include не обнаружен. Проверьте config.txt")
 
