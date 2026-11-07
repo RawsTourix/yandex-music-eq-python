@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parent
 PRESETS_FILE = ROOT / "presets.json"
 SETTINGS_FILE = ROOT / "settings.json"
 COMMON_SAMPLE_RATES = (44100, 48000, 88200, 96000, 176400, 192000)
+INTENSITIES = (0.25, 0.5, 1.0, 2.0, 4.0)
 
 
 class SettingsError(ValueError):
@@ -38,6 +39,7 @@ class Settings:
     preset_id: str
     preamp_linear: float
     gains_db: tuple[float, ...]
+    intensity: float = 1.0
 
     @classmethod
     def from_dict(cls, data: dict, frequencies: list[int]) -> "Settings":
@@ -50,12 +52,16 @@ class Settings:
             raise SettingsError("invalid enabled or presetId")
         if not isinstance(gains, list) or len(gains) != len(frequencies):
             raise SettingsError("invalid band count")
+        intensity = _number(data.get("intensity", 1.0), .25, 4.0, "intensity")
+        if intensity not in INTENSITIES:
+            raise SettingsError(f"intensity: expected one of {INTENSITIES}")
         return cls(enabled, preset_id, _number(data.get("preampLinear", 1.0), .5, 1.5, "preamp"),
-                   tuple(_number(g, -12, 12, "band gain") for g in gains))
+                   tuple(_number(g, -12, 12, "band gain") for g in gains), intensity)
 
     def to_dict(self) -> dict:
         return {"enabled": self.enabled, "presetId": self.preset_id,
-                "preampLinear": self.preamp_linear, "gainsDb": list(self.gains_db)}
+                "preampLinear": self.preamp_linear, "gainsDb": list(self.gains_db),
+                "intensity": self.intensity}
 
 
 def load_library(path: Path = PRESETS_FILE) -> dict:
@@ -146,19 +152,35 @@ def _biquad(kind: str, hz: int, gain_db: float, sample_rate: int, q: float = 1.0
 def generate_apo_config(settings: Settings, library: dict) -> str:
     """Generate an Equalizer APO include file, sample-rate-aware where possible.
 
-    IIR coefficients approximate Web Audio biquad math for common device rates;
-    APO native filters provide fallback for uncommon rates. No audio is processed
-    by Python; the system APO executes these commands.
+    Integer intensity repeats every biquad N times (N serial complete stages).
+    Fractional intensity approximates reduced strength by scaling each band dB
+    while preserving Q and taking preamp_linear ** intensity. This is NOT an
+    exact fractional power of the original complex transfer function.
+    No audio is processed by Python; the system APO executes these commands.
     """
     lines = ["# Yandex Music EQ Python - auto-generated; edit using the GUI", "# Do not edit manually"]
     if not settings.enabled:
         return "\n".join(lines + ["# Disabled: no processing commands", ""])
 
-    preamp_db = 20 * math.log10(settings.preamp_linear)
+    intensity = settings.intensity
+    if intensity not in INTENSITIES:
+        raise SettingsError(f"intensity: expected one of {INTENSITIES}")
+    lines.append(f"# Intensity x{intensity:g}")
+    if intensity < 1.0:
+        lines.append("# Fractional intensity approximates reduced EQ using scaled band dB.")
+    else:
+        lines.append(f"# Integer intensity: {int(intensity)} complete serial EQ stages.")
+    # Linear preamp is applied per stage: preamp_linear ** intensity. For
+    # integers, commuting the scalar gains to the front is mathematically exact.
+    preamp_db = 20 * math.log10(settings.preamp_linear) * intensity
     lines.append(f"Preamp: {preamp_db:.9f} dB")
     bands = tuple(zip(library["frequenciesHz"], library["filterTypes"], settings.gains_db))
-    # Skip unity-gain filters. For non-zero bands, Web Audio uses serial biquads.
-    active = [(f, k, g) for f, k, g in bands if abs(g) > 1e-10]
+    # Integer modes contain N identical *biquads*, not one biquad with N*gain:
+    # equal center gain is NOT equal transfer function/phase over all frequencies.
+    stages = int(intensity) if intensity >= 1 else 1
+    gain_scale = intensity if intensity < 1 else 1.0
+    active_stage = [(f, k, g * gain_scale) for f, k, g in bands if abs(g) > 1e-10]
+    active = active_stage * stages
     if not active:
         return "\n".join(lines + [""])
     for i, rate in enumerate(COMMON_SAMPLE_RATES):
