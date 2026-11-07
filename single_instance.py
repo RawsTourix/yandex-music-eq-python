@@ -1,105 +1,126 @@
-"""Single-instance Windows application guard and local show-window notification.
+"""One interactive-Windows-session process, with native wake-up signalling.
 
-A named Windows mutex is the authoritative single-instance lock within the
-interactive logon session. Qt's local socket is *only* an IPC signal to reveal
-the existing window; failure to connect must never allow a second instance.
+The named mutex is the authoritative single-instance guard. A named auto-reset
+Windows event lets a second launch request that the primary application reveal
+its window; the GUI polls it with a cheap Qt timer. No local socket race.
 """
 from __future__ import annotations
 
 import ctypes
 import os
-
-from PySide6.QtNetwork import QLocalServer, QLocalSocket
+import time
 
 MUTEX_NAME = r"Local\RawsTourix.YandexMusicEQ.SingleInstance"
-IPC_NAME = "RawsTourix.YandexMusicEQ.ShowWindow"
+EVENT_NAME = r"Local\RawsTourix.YandexMusicEQ.ShowWindow"
 ERROR_ALREADY_EXISTS = 183
+EVENT_MODIFY_STATE = 0x0002
+WAIT_OBJECT_0 = 0
+WAIT_TIMEOUT = 258
 
 
 class InstanceError(RuntimeError):
     pass
 
 
+def _kernel32():
+    if os.name != "nt":
+        raise InstanceError("Управление единственным экземпляром поддерживается в Windows")
+    dll = ctypes.WinDLL("kernel32", use_last_error=True)
+    dll.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+    dll.CreateMutexW.restype = ctypes.c_void_p
+    dll.CreateEventW.argtypes = [
+        ctypes.c_void_p, ctypes.c_bool, ctypes.c_bool, ctypes.c_wchar_p,
+    ]
+    dll.CreateEventW.restype = ctypes.c_void_p
+    dll.OpenEventW.argtypes = [ctypes.c_ulong, ctypes.c_bool, ctypes.c_wchar_p]
+    dll.OpenEventW.restype = ctypes.c_void_p
+    dll.SetEvent.argtypes = [ctypes.c_void_p]
+    dll.SetEvent.restype = ctypes.c_bool
+    dll.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+    dll.WaitForSingleObject.restype = ctypes.c_ulong
+    dll.CloseHandle.argtypes = [ctypes.c_void_p]
+    dll.CloseHandle.restype = ctypes.c_bool
+    return dll
+
+
 class WindowsInstanceMutex:
-    """Hold the kernel mutex handle for the entire lifetime of the GUI process."""
+    """Keep the kernel handle open for the lifetime of the primary process."""
 
     def __init__(self):
         self.handle = None
-        self._kernel32 = None
+        self._kernel = None
 
     def acquire(self) -> bool:
         if os.name != "nt":
             return True
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
-        kernel32.CreateMutexW.restype = ctypes.c_void_p
-        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
-        kernel32.CloseHandle.restype = ctypes.c_bool
+        kernel = _kernel32()
         ctypes.set_last_error(0)
-        handle = kernel32.CreateMutexW(None, False, MUTEX_NAME)
+        handle = kernel.CreateMutexW(None, False, MUTEX_NAME)
         if not handle:
             raise InstanceError(
                 f"Не удалось создать блокировку процесса (Win32: {ctypes.get_last_error()})"
             )
         if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
-            kernel32.CloseHandle(handle)
+            kernel.CloseHandle(handle)
             return False
-        self._kernel32 = kernel32
+        self._kernel = kernel
         self.handle = handle
         return True
 
     def release(self):
-        if self.handle is not None and self._kernel32 is not None:
-            self._kernel32.CloseHandle(self.handle)
+        if self.handle is not None and self._kernel is not None:
+            self._kernel.CloseHandle(self.handle)
+            self.handle = None
+
+
+class ActivationEvent:
+    """The first process owns an auto-reset event used to request ShowWindow."""
+
+    def __init__(self):
+        self.handle = None
+        self._kernel = None
+
+    def create(self):
+        kernel = _kernel32()
+        handle = kernel.CreateEventW(None, False, False, EVENT_NAME)
+        if not handle:
+            raise InstanceError(
+                f"Не удалось создать событие активации (Win32: {ctypes.get_last_error()})"
+            )
+        self._kernel = kernel
+        self.handle = handle
+
+    def consume(self) -> bool:
+        if self.handle is None or self._kernel is None:
+            return False
+        result = self._kernel.WaitForSingleObject(self.handle, 0)
+        if result == WAIT_OBJECT_0:
+            return True
+        if result == WAIT_TIMEOUT:
+            return False
+        raise InstanceError(
+            f"Ошибка ожидания события активации (Win32: {ctypes.get_last_error()})"
+        )
+
+    def close(self):
+        if self.handle is not None and self._kernel is not None:
+            self._kernel.CloseHandle(self.handle)
             self.handle = None
 
 
 def notify_running_instance() -> bool:
-    """Best-effort wake-up; the mutex, not this socket, enforces uniqueness."""
-    for _ in range(5):
-        socket = QLocalSocket()
-        socket.connectToServer(IPC_NAME)
-        if socket.waitForConnected(250):
-            socket.write(b"SHOW\n")
-            socket.waitForBytesWritten(250)
-            socket.disconnectFromServer()
-            return True
-        socket.abort()
+    """Send wake-up signal to the first process without launching another GUI."""
+    if os.name != "nt":
+        return False
+    kernel = _kernel32()
+    # The primary may still be starting between mutex and event creation.
+    for attempt in range(8):
+        handle = kernel.OpenEventW(EVENT_MODIFY_STATE, False, EVENT_NAME)
+        if handle:
+            try:
+                return bool(kernel.SetEvent(handle))
+            finally:
+                kernel.CloseHandle(handle)
+        if attempt < 7:
+            time.sleep(.15)
     return False
-
-
-class ActivationServer:
-    def __init__(self, on_show):
-        self.server = QLocalServer()
-        self._on_show = on_show
-        self._clients = set()
-        self.server.newConnection.connect(self._accept)
-
-    def start(self):
-        if not self.server.listen(IPC_NAME):
-            # Windows named pipes do not leave stale socket files behind.
-            # Never forcibly remove a live server's endpoint.
-            raise InstanceError(f"Не удалось запустить локальный IPC: {self.server.errorString()}")
-
-    def _accept(self):
-        while self.server.hasPendingConnections():
-            socket = self.server.nextPendingConnection()
-            self._clients.add(socket)
-            socket.readyRead.connect(lambda sock=socket: self._receive(sock))
-            socket.disconnected.connect(lambda sock=socket: self._cleanup(sock))
-            if socket.bytesAvailable():
-                self._receive(socket)
-
-    def _receive(self, socket):
-        if bytes(socket.readAll()).strip() == b"SHOW":
-            self._on_show()
-
-    def _cleanup(self, socket):
-        self._clients.discard(socket)
-        socket.deleteLater()
-
-    def close(self):
-        self.server.close()
-        for socket in list(self._clients):
-            socket.abort()
-        self._clients.clear()
