@@ -2,7 +2,7 @@ name: Python checks
 
 on:
   push:
-    branches: [main, feat/initial-python-equalizer]
+    branches: [main, feat/initial-python-equalizer, feat/equalizer-intensity]
   pull_request:
 
 jobs:
@@ -13,7 +13,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: Install GUI dependencies
+        run: python -m pip install -r requirements.txt
       - name: Compile sources
         run: python -m compileall -q .
-      - name: Unit tests
+      - name: Unit and headless GUI tests
+        env:
+          QT_QPA_PLATFORM: offscreen
         run: python -m unittest discover -s tests -v

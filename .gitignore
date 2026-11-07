@@ -4,5 +4,7 @@ __pycache__/
 venv/
 .pytest_cache/
 settings.json
+user_presets.json
+*.yeq.json
 *.bak
 .DS_Store

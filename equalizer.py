@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parent
 PRESETS_FILE = ROOT / "presets.json"
 SETTINGS_FILE = ROOT / "settings.json"
 COMMON_SAMPLE_RATES = (44100, 48000, 88200, 96000, 176400, 192000)
+INTENSITIES = (0.25, 0.5, 1.0, 2.0, 4.0)
 
 
 class SettingsError(ValueError):
@@ -32,12 +33,21 @@ def _number(value: object, minimum: float, maximum: float, label: str) -> float:
     return number
 
 
+def _intensity(value: object, label: str) -> float:
+    number = _number(value, INTENSITIES[0], INTENSITIES[-1], label)
+    if number not in INTENSITIES:
+        raise SettingsError(f"{label}: expected one of {INTENSITIES}")
+    return number
+
+
 @dataclass(frozen=True)
 class Settings:
     enabled: bool
     preset_id: str
     preamp_linear: float
     gains_db: tuple[float, ...]
+    preamp_intensity: float = 1.0
+    band_intensities: tuple[float, ...] = (1.0,) * 10
 
     @classmethod
     def from_dict(cls, data: dict, frequencies: list[int]) -> "Settings":
@@ -50,12 +60,26 @@ class Settings:
             raise SettingsError("invalid enabled or presetId")
         if not isinstance(gains, list) or len(gains) != len(frequencies):
             raise SettingsError("invalid band count")
+        # Migrate the former global intensity into all 11 individual controls.
+        # Explicit new fields take precedence; missing fields use the legacy value.
+        legacy = data.get("intensity", 1.0)
+        preamp_intensity = _intensity(data.get("preampIntensity", legacy), "preamp intensity")
+        band_values = data.get("bandIntensities", [legacy] * len(frequencies))
+        if not isinstance(band_values, list) or len(band_values) != len(frequencies):
+            raise SettingsError("invalid intensity band count")
+        band_intensities = tuple(
+            _intensity(value, f"band {index + 1} intensity")
+            for index, value in enumerate(band_values)
+        )
         return cls(enabled, preset_id, _number(data.get("preampLinear", 1.0), .5, 1.5, "preamp"),
-                   tuple(_number(g, -12, 12, "band gain") for g in gains))
+                   tuple(_number(g, -12, 12, "band gain") for g in gains),
+                   preamp_intensity, band_intensities)
 
     def to_dict(self) -> dict:
         return {"enabled": self.enabled, "presetId": self.preset_id,
-                "preampLinear": self.preamp_linear, "gainsDb": list(self.gains_db)}
+                "preampLinear": self.preamp_linear, "gainsDb": list(self.gains_db),
+                "preampIntensity": self.preamp_intensity,
+                "bandIntensities": list(self.band_intensities)}
 
 
 def load_library(path: Path = PRESETS_FILE) -> dict:
@@ -81,10 +105,16 @@ def preset_settings(library: dict, preset_id: str, *, enabled: bool) -> Settings
                                "gainsDb": preset["gainsDb"]}, library["frequenciesHz"])
 
 
-def load_settings(library: dict, path: Path = SETTINGS_FILE) -> Settings:
+def load_settings(library: dict, path: Path = SETTINGS_FILE,
+                  user_preset_ids=()) -> Settings:
     if path.exists():
         result = Settings.from_dict(json.loads(path.read_text(encoding="utf-8")), library["frequenciesHz"])
-        if result.preset_id not in library["presets"]:
+        if result.preset_id not in library["presets"] and result.preset_id not in user_preset_ids:
+            # The selected user preset may have been deleted or moved.
+            # Keep the live sound settings; fall back to unsaved Custom.
+            if result.preset_id.startswith("USER:"):
+                return Settings(result.enabled, "CUSTOM", result.preamp_linear,
+                                result.gains_db, result.preamp_intensity, result.band_intensities)
             raise SettingsError(f"unknown preset: {result.preset_id}")
         return result
     return preset_settings(library, "DEFAULT", enabled=False)
@@ -146,19 +176,43 @@ def _biquad(kind: str, hz: int, gain_db: float, sample_rate: int, q: float = 1.0
 def generate_apo_config(settings: Settings, library: dict) -> str:
     """Generate an Equalizer APO include file, sample-rate-aware where possible.
 
-    IIR coefficients approximate Web Audio biquad math for common device rates;
-    APO native filters provide fallback for uncommon rates. No audio is processed
-    by Python; the system APO executes these commands.
+    The 11 multipliers are independent: preamp_linear ** preamp_intensity,
+    and N copies of an original biquad for bands with integer intensity N.
+    Fractional band intensity approximates reduced processing by scaling band
+    gain dB; it is not the exact fractional complex transfer-function power.
+    Since the linear filters commute, adjacent copies of a band are equivalent
+    to serially repeating complete chains for identical multiplier settings.
+    No audio is processed by Python; the system APO executes these commands.
     """
     lines = ["# Yandex Music EQ Python - auto-generated; edit using the GUI", "# Do not edit manually"]
     if not settings.enabled:
         return "\n".join(lines + ["# Disabled: no processing commands", ""])
 
-    preamp_db = 20 * math.log10(settings.preamp_linear)
+    if len(settings.band_intensities) != len(settings.gains_db):
+        raise SettingsError("intensity band count mismatch")
+    preamp_factor = _intensity(settings.preamp_intensity, "preamp intensity")
+    bands = tuple(zip(
+        library["frequenciesHz"], library["filterTypes"],
+        settings.gains_db, settings.band_intensities,
+    ))
+    lines.append(f"# Preamp intensity x{preamp_factor:g}")
+    lines.append("# Band intensities: " + ", ".join(
+        f"{factor:g}" for factor in settings.band_intensities
+    ))
+    # Scalar preamp gain is independent of the ten biquad multipliers.
+    preamp_db = 20 * math.log10(settings.preamp_linear) * preamp_factor
     lines.append(f"Preamp: {preamp_db:.9f} dB")
-    bands = tuple(zip(library["frequenciesHz"], library["filterTypes"], settings.gains_db))
-    # Skip unity-gain filters. For non-zero bands, Web Audio uses serial biquads.
-    active = [(f, k, g) for f, k, g in bands if abs(g) > 1e-10]
+    active = []
+    for hz, kind, gain, factor in bands:
+        factor = _intensity(factor, f"{hz} Hz intensity")
+        if abs(gain) <= 1e-10:
+            continue
+        if factor < 1:
+            # Fractional approximation: preserve Q, attenuate dB.
+            active.append((hz, kind, gain * factor))
+        else:
+            # Exact serial copies for x1/x2/x4, not one stronger biquad.
+            active.extend([(hz, kind, gain)] * int(factor))
     if not active:
         return "\n".join(lines + [""])
     for i, rate in enumerate(COMMON_SAMPLE_RATES):
@@ -172,6 +226,6 @@ def generate_apo_config(settings: Settings, library: dict) -> str:
     types = {"lowshelf": "LS", "peaking": "PK", "highshelf": "HS"}
     for j, (hz, kind, gain) in enumerate(active, 1):
         extra = " Q 1.0" if kind == "peaking" else ""
-        lines.append(f"    Filter {j}: ON {types[kind]} Fc {hz} Hz Gain {gain:.1f} dB{extra}")
+        lines.append(f"    Filter {j}: ON {types[kind]} Fc {hz} Hz Gain {gain:.6g} dB{extra}")
     lines.extend(["EndIf:", ""])
     return "\n".join(lines)

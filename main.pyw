@@ -10,18 +10,21 @@ from dataclasses import replace
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, Signal, QProcess, QThread
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QPainter, QPen, QShortcut, QKeySequence
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QHBoxLayout, QLabel, QMainWindow,
     QMessageBox, QPushButton, QVBoxLayout, QWidget, QPlainTextEdit,
+    QToolButton, QMenu, QInputDialog, QFileDialog,
 )
 
 import apo
 import installer
 import device_status
+import user_presets as profiles
+from history import AudioState, EditHistory
 from equalizer import (
-    SETTINGS_FILE, Settings, load_custom, load_library, load_settings,
-    preset_settings, save_settings,
+    INTENSITIES, SETTINGS_FILE, Settings, load_custom, load_library,
+    load_settings, preset_settings, save_settings,
 )
 
 BG = QColor("#1a1a1a")
@@ -29,6 +32,7 @@ MUTED = QColor("#898989")
 RAIL = QColor("#353535")
 YELLOW = QColor("#ffff00")
 FREQUENCY_LABELS = ("60", "170", "310", "600", "1k", "3k", "6k", "12k", "14k", "16k")
+INTENSITY_LABELS = {0.25: "×¼", 0.5: "×½", 1.0: "×1", 2.0: "×2", 4.0: "×4"}
 
 
 DIALOG_STYLE = """
@@ -63,6 +67,8 @@ def make_dialog(parent: QWidget, title: str, message: str, icon: QMessageBox.Ico
 
 class BandSlider(QWidget):
     value_changed = Signal(float)
+    edit_started = Signal()
+    edit_finished = Signal()
 
     def __init__(self, label: str, minimum: float, maximum: float, value: float, width: int = 31):
         super().__init__()
@@ -92,7 +98,13 @@ class BandSlider(QWidget):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
+            self.edit_started.emit()
             self._from_y(event.position().y())
+            event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.edit_finished.emit()
             event.accept()
 
     def mouseMoveEvent(self, event):
@@ -187,7 +199,12 @@ class Window(QMainWindow):
         super().__init__()
         self.library = load_library()
         try:
-            self.settings = load_settings(self.library)
+            self.user_presets = profiles.load_user_presets(
+                frequencies=self.library["frequenciesHz"]
+            )
+            self.settings = load_settings(
+                self.library, user_preset_ids=self.user_presets
+            )
             self.custom = load_custom(self.library)
         except (OSError, ValueError, KeyError, TypeError) as exc:
             # Do not overwrite an invalid file silently. The user must inspect it.
@@ -198,7 +215,7 @@ class Window(QMainWindow):
             ).exec()
             raise
         self.setWindowTitle("Yandex Music EQ — independent")
-        self.setFixedSize(463, 480)
+        self.setFixedSize(463, 516)
         self.setStyleSheet("""
             QMainWindow, QWidget#root { background: #1a1a1a; }
             QWidget#root QLabel { color: #dedede; font-family: 'Segoe UI'; }
@@ -235,28 +252,102 @@ class Window(QMainWindow):
         sliders.setSpacing(0)
         self.preamp = BandSlider("уровень", .5, 1.5, self.settings.preamp_linear, width=51)
         self.preamp.value_changed.connect(self.edit_preamp)
-        sliders.addWidget(self.preamp)
+        self.preamp.edit_started.connect(self.begin_slider_edit)
+        self.preamp.edit_finished.connect(self.end_slider_edit)
+        self.preamp_intensity_button = self.make_intensity_button(
+            None, "предусиление", self.settings.preamp_intensity, 51,
+        )
+        sliders.addLayout(self.slider_column(self.preamp, self.preamp_intensity_button))
         sliders.addSpacing(7)
-        sliders.addWidget(Scale())
+        sliders.addWidget(Scale(), alignment=Qt.AlignmentFlag.AlignTop)
         sliders.addStretch(1)
         self.bands = []
+        self.band_intensity_buttons = []
         for index, name in enumerate(FREQUENCY_LABELS):
             slider = BandSlider(name, -12, 12, self.settings.gains_db[index])
             slider.value_changed.connect(lambda value, i=index: self.edit_band(i, value))
-            sliders.addWidget(slider)
+            slider.edit_started.connect(self.begin_slider_edit)
+            slider.edit_finished.connect(self.end_slider_edit)
+            button = self.make_intensity_button(
+                index, f"{name} Гц", self.settings.band_intensities[index], 31,
+            )
+            sliders.addLayout(self.slider_column(slider, button))
             self.bands.append(slider)
+            self.band_intensity_buttons.append(button)
         sliders.addStretch(1)
         layout.addLayout(sliders)
+        self.preset_dirty = (
+            self.settings.preset_id in self.user_presets and
+            profiles.snapshot(
+                self.settings, self.user_presets[self.settings.preset_id]["name"]
+            ) != self.user_presets[self.settings.preset_id]
+        )
+        preset_row = QHBoxLayout()
+        preset_row.setSpacing(6)
         self.preset = QComboBox()
         self.preset.setFixedHeight(52)
-        self.preset.addItem("Своя настройка", "CUSTOM")
-        self.preset.addItem("По умолчанию", "DEFAULT")
-        for name in self.library["presets"]:
-            if name not in ("CUSTOM", "DEFAULT"):
-                self.preset.addItem(name.replace("_", " ").title(), name)
-        self.preset.setCurrentIndex(self.preset.findData(self.settings.preset_id))
+        self.refresh_preset_items(self.settings.preset_id)
         self.preset.currentIndexChanged.connect(self.choose_preset)
-        layout.addWidget(self.preset)
+        preset_row.addWidget(self.preset, stretch=1)
+        self.preset_actions = QToolButton(self)
+        self.preset_actions.setText("⋯")
+        self.preset_actions.setFixedSize(31, 36)
+        self.preset_actions.setToolTip("Управление пользовательскими пресетами")
+        self.preset_actions.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.preset_actions.setStyleSheet("""
+            QToolButton { color: #dedede; background: #303030;
+                border: 1px solid #5b5b5b; border-radius: 9px; font: 18px 'Segoe UI'; }
+            QToolButton:hover { border-color: #ffff00; }
+            QToolButton::menu-indicator { image: none; width: 0; }
+        """)
+        self.preset_menu = QMenu(self.preset_actions)
+        self.preset_menu.setStyleSheet("""
+            QMenu { color: #ededed; background: #272727; border: 1px solid #555; }
+            QMenu::item { padding: 7px 16px; }
+            QMenu::item:selected { background: #3d3d3d; color: #ffff00; }
+            QMenu::item:disabled { color: #777777; }
+        """)
+        self.action_undo = self.preset_menu.addAction("Отменить\tCtrl+Z")
+        self.action_undo.triggered.connect(self.undo_edit)
+        self.action_redo = self.preset_menu.addAction("Повторить\tCtrl+Y")
+        self.action_redo.triggered.connect(self.redo_edit)
+        self.preset_menu.addSeparator()
+        self.action_save = self.preset_menu.addAction("Сохранить пресет\tCtrl+S")
+        self.action_save.triggered.connect(self.save_current_preset)
+        self.action_save_as = self.preset_menu.addAction("Сохранить как…\tCtrl+Shift+S")
+        self.action_save_as.triggered.connect(self.save_preset_as)
+        self.action_rename = self.preset_menu.addAction("Переименовать…")
+        self.action_rename.triggered.connect(self.rename_user_preset)
+        self.action_delete = self.preset_menu.addAction("Удалить…")
+        self.action_delete.triggered.connect(self.delete_user_preset)
+        self.preset_menu.addSeparator()
+        self.action_export = self.preset_menu.addAction("Экспортировать…\tCtrl+E")
+        self.action_export.triggered.connect(self.export_current_preset)
+        self.action_import = self.preset_menu.addAction("Импортировать…\tCtrl+O")
+        self.action_import.triggered.connect(self.import_user_preset)
+        self.preset_menu.aboutToShow.connect(self.update_preset_actions)
+        self.preset_actions.setMenu(self.preset_menu)
+        preset_row.addWidget(self.preset_actions)
+        layout.addLayout(preset_row)
+        self.history = EditHistory(capacity=100)
+        self._slider_drag_before: AudioState | None = None
+        self._restoring_history = False
+        self.shortcuts = []
+        for combination, handler in (
+            ("Ctrl+Z", self.undo_edit),
+            ("Ctrl+Y", self.redo_edit),
+            ("Ctrl+Shift+Z", self.redo_edit),
+            ("Ctrl+S", self.save_current_preset),
+            ("Ctrl+Shift+S", self.save_preset_as),
+            ("Ctrl+E", self.export_current_preset),
+            ("Ctrl+O", self.import_user_preset),
+        ):
+            shortcut = QShortcut(QKeySequence(combination), self)
+            shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+            shortcut.activated.connect(handler)
+            self.shortcuts.append(shortcut)
+        self.set_preset_dirty(self.preset_dirty)
+        self.update_history_actions()
         bottom = QHBoxLayout()
         self.status = QLabel()
         self.status.setStyleSheet("color: #848484; font-size: 11px;")
@@ -291,6 +382,340 @@ class Window(QMainWindow):
         self.connection_timer.start(2000)
         self.check_connection()
         QTimer.singleShot(250, self.startup_check)
+
+    def refresh_preset_items(self, select_id: str):
+        """Rebuild the list without changing the active audio settings."""
+        was_blocked = self.preset.blockSignals(True)
+        try:
+            self.preset.clear()
+            self.preset.addItem("Своя настройка", "CUSTOM")
+            self.preset.addItem("По умолчанию", "DEFAULT")
+            for preset_id in self.library["presets"]:
+                if preset_id not in ("CUSTOM", "DEFAULT"):
+                    self.preset.addItem(preset_id.replace("_", " ").title(), preset_id)
+            if self.user_presets:
+                self.preset.insertSeparator(self.preset.count())
+                for preset_id, record in self.user_presets.items():
+                    self.preset.addItem("★ " + record["name"], preset_id)
+            index = self.preset.findData(select_id)
+            self.preset.setCurrentIndex(index if index >= 0 else self.preset.findData("CUSTOM"))
+        finally:
+            self.preset.blockSignals(was_blocked)
+
+    def _current_user_id(self) -> str | None:
+        selected = self.settings.preset_id
+        return selected if selected in self.user_presets else None
+
+    def set_preset_dirty(self, dirty: bool):
+        """Show unsaved edits unobtrusively without a separate Save button."""
+        self.preset_dirty = dirty
+        selected = self._current_user_id()
+        self.action_save.setText(
+            ("Сохранить изменения" if selected else "Сохранить пресет")
+            + "\tCtrl+S"
+        )
+        self.preset_actions.setToolTip(
+            "Есть несохранённые изменения профиля" if dirty
+            else "Управление пользовательскими пресетами"
+        )
+        if selected:
+            index = self.preset.findData(selected)
+            if index >= 0:
+                name = self.user_presets[selected]["name"]
+                self.preset.setItemText(index, "★ " + name + (" *" if dirty else ""))
+
+    def sync_preset_dirty(self):
+        selected = self._current_user_id()
+        dirty = bool(
+            selected and profiles.snapshot(
+                self.settings, self.user_presets[selected]["name"]
+            ) != self.user_presets[selected]
+        )
+        self.set_preset_dirty(dirty)
+
+    def update_preset_actions(self):
+        available = self._current_user_id() is not None
+        for action in (self.action_rename, self.action_delete):
+            action.setEnabled(available)
+        self.update_history_actions()
+
+    def audio_state(self) -> AudioState:
+        return AudioState(self.settings, self.custom)
+
+    def update_history_actions(self):
+        self.action_undo.setEnabled(self.history.can_undo)
+        self.action_redo.setEnabled(self.history.can_redo)
+
+    def record_audio_edit(self, before: AudioState):
+        if self._restoring_history or self._slider_drag_before is not None:
+            return
+        self.history.record(before, self.audio_state())
+        self.update_history_actions()
+
+    def begin_slider_edit(self):
+        if self._slider_drag_before is None:
+            self._slider_drag_before = self.audio_state()
+
+    def end_slider_edit(self):
+        if self._slider_drag_before is None:
+            return
+        before = self._slider_drag_before
+        self._slider_drag_before = None
+        self.history.record(before, self.audio_state())
+        self.update_history_actions()
+
+    def restore_audio_state(self, state: AudioState):
+        """Restore the entire live sound without creating another history entry."""
+        self._restoring_history = True
+        try:
+            self.settings, self.custom = state.settings, state.custom
+            self.switch.set_checked(self.settings.enabled)
+            self.preamp.set_value(self.settings.preamp_linear)
+            for slider, gain in zip(self.bands, self.settings.gains_db):
+                slider.set_value(gain)
+            self.reflect_intensity_widgets()
+            self.refresh_preset_items(self.settings.preset_id)
+            self.sync_preset_dirty()
+        finally:
+            self._restoring_history = False
+        self.schedule_write()
+
+    def undo_edit(self):
+        if self._slider_drag_before is not None:
+            self.end_slider_edit()
+        state = self.history.undo(self.audio_state())
+        if state is not None:
+            self.restore_audio_state(state)
+        self.update_history_actions()
+
+    def redo_edit(self):
+        if self._slider_drag_before is not None:
+            self.end_slider_edit()
+        state = self.history.redo(self.audio_state())
+        if state is not None:
+            self.restore_audio_state(state)
+        self.update_history_actions()
+
+    def _preset_error(self, title: str, exception: Exception):
+        message = str(exception)
+        self.report(f"{title}: {message}")
+        make_dialog(self, title, message, QMessageBox.Icon.Warning).exec()
+
+    def _ask_preset_name(self, title: str, initial: str) -> str | None:
+        dialog = QInputDialog(self)
+        dialog.setWindowTitle(title)
+        dialog.setLabelText("Название пресета:")
+        dialog.setTextValue(initial)
+        dialog.setOkButtonText("Сохранить")
+        dialog.setCancelButtonText("Отмена")
+        dialog.setStyleSheet("""
+            QInputDialog { background: #1a1a1a; }
+            QInputDialog QLabel { color: #eeeeee; font: 12px 'Segoe UI'; }
+            QInputDialog QLineEdit {
+                color: #eeeeee; background: #292929;
+                border: 1px solid #666666; padding: 6px;
+            }
+            QInputDialog QPushButton {
+                color: #eeeeee; background: #323232; border: 1px solid #666666;
+                border-radius: 5px; padding: 5px 12px;
+            }
+        """)
+        if dialog.exec() != QInputDialog.DialogCode.Accepted:
+            return None
+        return dialog.textValue()
+
+    def _write_profiles(self, updated: dict[str, dict]) -> bool:
+        try:
+            profiles.save_user_presets(
+                updated, frequencies=self.library["frequenciesHz"]
+            )
+        except (OSError, ValueError) as exc:
+            self._preset_error("Не удалось сохранить пресеты", exc)
+            return False
+        self.user_presets = updated
+        return True
+
+    def save_current_preset(self):
+        if self._current_user_id():
+            self.update_user_preset()
+        else:
+            self.save_preset_as()
+
+    def save_preset_as(self):
+        selected = self._current_user_id()
+        default = self.user_presets[selected]["name"] + " (копия)" if selected else "Мой пресет"
+        name = self._ask_preset_name("Сохранить новый пресет", default)
+        if name is None:
+            return False
+        try:
+            name = profiles.ensure_unique_name(self.user_presets, name)
+            record = profiles.snapshot(self.settings, name)
+            new_id = profiles.new_preset_id()
+            updated = dict(self.user_presets)
+            if len(updated) >= profiles.MAX_PRESETS:
+                raise profiles.UserPresetError("Достигнут предел в 200 пользовательских пресетов")
+            updated[new_id] = record
+        except (ValueError, TypeError) as exc:
+            self._preset_error("Некорректный пресет", exc)
+            return False
+        if not self._write_profiles(updated):
+            return False
+        before = self.audio_state()
+        self.settings = replace(self.settings, preset_id=new_id)
+        self.refresh_preset_items(new_id)
+        self.set_preset_dirty(False)
+        self.record_audio_edit(before)
+        self.commit_settings()
+        self.report(f"Сохранён пользовательский пресет «{name}» со всеми 11 множителями.")
+        return True
+
+    def update_user_preset(self):
+        preset_id = self._current_user_id()
+        if preset_id is None:
+            self.report("Выберите пользовательский пресет или используйте «Сохранить как…».")
+            return False
+        name = self.user_presets[preset_id]["name"]
+        try:
+            record = profiles.snapshot(self.settings, name)
+        except (ValueError, TypeError) as exc:
+            self._preset_error("Некорректные параметры пресета", exc)
+            return False
+        updated = dict(self.user_presets)
+        updated[preset_id] = record
+        if not self._write_profiles(updated):
+            return False
+        self.set_preset_dirty(False)
+        self.commit_settings()
+        self.report(f"Пресет «{name}» обновлён.")
+        return True
+
+    def rename_user_preset(self):
+        preset_id = self._current_user_id()
+        if preset_id is None:
+            return
+        current = self.user_presets[preset_id]
+        name = self._ask_preset_name("Переименовать пресет", current["name"])
+        if name is None:
+            return
+        try:
+            name = profiles.ensure_unique_name(self.user_presets, name, ignore_id=preset_id)
+        except ValueError as exc:
+            self._preset_error("Не удалось переименовать пресет", exc)
+            return
+        updated = dict(self.user_presets)
+        updated[preset_id] = {**current, "name": name}
+        if self._write_profiles(updated):
+            self.refresh_preset_items(preset_id)
+            self.report(f"Пресет переименован в «{name}».")
+
+    def delete_user_preset(self):
+        preset_id = self._current_user_id()
+        if preset_id is None:
+            return
+        name = self.user_presets[preset_id]["name"]
+        dialog = make_dialog(
+            self, "Удалить пресет?",
+            f"Удалить пользовательский пресет «{name}»?\n"
+            "Текущие настройки звука останутся в режиме «Своя настройка».",
+            QMessageBox.Icon.Warning,
+        )
+        dialog.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        dialog.setDefaultButton(QMessageBox.StandardButton.No)
+        dialog.button(QMessageBox.StandardButton.Yes).setText("Удалить")
+        dialog.button(QMessageBox.StandardButton.No).setText("Отмена")
+        if dialog.exec() != QMessageBox.StandardButton.Yes:
+            return
+        updated = dict(self.user_presets)
+        del updated[preset_id]
+        if not self._write_profiles(updated):
+            return
+        self.settings = replace(self.settings, preset_id="CUSTOM")
+        self.custom = replace(self.settings, enabled=False)
+        self.refresh_preset_items("CUSTOM")
+        self.set_preset_dirty(False)
+        # A deleted profile may be referenced by older snapshots. Treat file
+        # deletion as an undo-history boundary, not an undoable DSP edit.
+        self.history.clear()
+        self.update_history_actions()
+        self.commit_settings()
+        self.report(f"Пресет «{name}» удалён. Текущий звук сохранён.")
+
+    def export_current_preset(self):
+        preset_id = self._current_user_id()
+        if preset_id:
+            name = self.user_presets[preset_id]["name"]
+        else:
+            name = self.preset.currentText() or "Мой пресет"
+        safe_name = "".join(
+            char for char in name if char not in '\\/:*?"<>|' and ord(char) >= 32
+        )[:48].strip(" .") or "preset"
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Экспортировать настройку эквалайзера",
+            str(Path(__file__).resolve().parent / f"{safe_name}.yeq.json"),
+            "Пресет эквалайзера (*.yeq.json);;JSON (*.json)",
+        )
+        if not filename:
+            return
+        path = Path(filename)
+        if path.suffix.lower() != ".json":
+            path = path.with_name(path.name + ".yeq.json")
+        try:
+            profiles.export_preset(profiles.snapshot(self.settings, name), path)
+        except (OSError, ValueError, TypeError) as exc:
+            self._preset_error("Ошибка экспорта", exc)
+            return
+        self.report(f"Пресет экспортирован: {path}")
+
+    def import_user_preset(self):
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Импортировать пресет эквалайзера",
+            str(Path(__file__).resolve().parent),
+            "Пресет эквалайзера (*.yeq.json *.json)",
+        )
+        if not filename:
+            return
+        try:
+            record = profiles.import_preset(Path(filename))
+            name = record["name"]
+            try:
+                profiles.ensure_unique_name(self.user_presets, name)
+            except profiles.UserPresetError:
+                requested = self._ask_preset_name(
+                    "Такое название уже есть — укажите новое", name + " (импорт)"
+                )
+                if requested is None:
+                    return
+                name = profiles.ensure_unique_name(self.user_presets, requested)
+                record = {**record, "name": name}
+            updated = dict(self.user_presets)
+            if len(updated) >= profiles.MAX_PRESETS:
+                raise profiles.UserPresetError("Достигнут предел в 200 пользовательских пресетов")
+            new_id = profiles.new_preset_id()
+            updated[new_id] = record
+        except (OSError, ValueError, TypeError) as exc:
+            self._preset_error("Ошибка импорта", exc)
+            return
+        if not self._write_profiles(updated):
+            return
+        # Import only registers a preset. Do not unexpectedly replace live audio.
+        self.refresh_preset_items(self.settings.preset_id)
+        self.report(f"Пресет «{name}» импортирован. Выберите его в списке для применения.")
+
+    def reflect_intensity_widgets(self):
+        pairs = [(self.preamp_intensity_button, self.settings.preamp_intensity, "предусиление")]
+        pairs.extend(
+            (button, value, f"{FREQUENCY_LABELS[index]} Гц")
+            for index, (button, value) in enumerate(
+                zip(self.band_intensity_buttons, self.settings.band_intensities)
+            )
+        )
+        for button, value, label in pairs:
+            button.setText(INTENSITY_LABELS[value])
+            button.setToolTip(f"Интенсивность {label}: ×{value:g}. Нажмите для выбора.")
+            for action in button.menu().actions():
+                action.setChecked(action.data() == value)
 
     def report(self, message: str):
         """Show diagnostics in the window rather than in a hidden console."""
@@ -370,22 +795,101 @@ class Window(QMainWindow):
         self.write_timer.start(160)
 
     def toggle(self, enabled: bool):
+        before = self.audio_state()
         self.settings = replace(self.settings, enabled=enabled)
+        self.record_audio_edit(before)
+        self.schedule_write()
+
+    @staticmethod
+    def slider_column(slider: BandSlider, control: QToolButton) -> QVBoxLayout:
+        column = QVBoxLayout()
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(2)
+        column.addWidget(slider)
+        column.addWidget(control, alignment=Qt.AlignmentFlag.AlignHCenter)
+        return column
+
+    def make_intensity_button(self, band: int | None, name: str,
+                              factor: float, width: int) -> QToolButton:
+        """Compact multiplier directly beneath its own gain/band slider."""
+        button = QToolButton(self)
+        button.setFixedSize(width, 25)
+        button.setText(INTENSITY_LABELS[factor])
+        button.setAccessibleName(f"Интенсивность: {name}")
+        button.setToolTip(f"Интенсивность {name}: ×{factor:g}. Нажмите для выбора.")
+        button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        button.setStyleSheet("""
+            QToolButton {
+                color: #dedede; background: #292929; font: 9px 'Segoe UI';
+                border: 1px solid #494949; border-radius: 5px; padding: 1px;
+            }
+            QToolButton:hover { border-color: #ffff00; }
+            QToolButton::menu-indicator { image: none; width: 0px; }
+        """)
+        menu = QMenu(button)
+        menu.setMinimumWidth(102)
+        menu.setStyleSheet("""
+            QMenu { color: #eeeeee; background: #282828; border: 1px solid #555; }
+            QMenu::item { padding: 6px 16px; }
+            QMenu::item:selected { color: #ffff00; background: #3a3a3a; }
+        """)
+        for mode in INTENSITIES:
+            action = menu.addAction(f"×{mode:g}")
+            action.setData(mode)
+            action.setCheckable(True)
+            action.setChecked(mode == factor)
+            action.triggered.connect(
+                lambda checked=False, value=mode, target=band, widget=button:
+                self.change_intensity(target, value, widget)
+            )
+        button.setMenu(menu)
+        return button
+
+    def change_intensity(self, band: int | None, value: float,
+                         button: QToolButton):
+        before = self.audio_state()
+        if band is None:
+            self.settings = replace(self.settings, preamp_intensity=value)
+            name = "предусиления"
+        else:
+            multipliers = list(self.settings.band_intensities)
+            multipliers[band] = value
+            self.settings = replace(self.settings, band_intensities=tuple(multipliers))
+            name = f"полосы {FREQUENCY_LABELS[band]}"
+        button.setText(INTENSITY_LABELS[value])
+        button.setToolTip(f"Интенсивность {name}: ×{value:g}. Нажмите для выбора.")
+        for action in button.menu().actions():
+            action.setChecked(action.data() == value)
+        if value >= 2:
+            self.report(f"×{value:g} для {name}: последовательное усиление. Возможен клиппинг.")
+        elif value < 1:
+            self.report(f"×{value:g} для {name}: приближённое ослабление эффекта.")
+        # An edited user preset must be explicitly saved before replacing it.
+        self.sync_preset_dirty()
+        self.record_audio_edit(before)
+        self.schedule_write()
+
+    def mark_edited(self):
+        if not self._current_user_id():
+            self.settings = replace(self.settings, preset_id="CUSTOM")
+            self.custom = replace(self.settings, enabled=False)
+            self.mark_custom()
+        self.sync_preset_dirty()
         self.schedule_write()
 
     def edit_preamp(self, value: float):
-        self.settings = replace(self.settings, preset_id="CUSTOM", preamp_linear=value)
-        self.custom = replace(self.settings, enabled=False)
-        self.mark_custom()
-        self.schedule_write()
+        before = self.audio_state()
+        self.settings = replace(self.settings, preamp_linear=value)
+        self.mark_edited()
+        self.record_audio_edit(before)
 
     def edit_band(self, index: int, value: float):
+        before = self.audio_state()
         gains = list(self.settings.gains_db)
         gains[index] = value
-        self.settings = replace(self.settings, preset_id="CUSTOM", gains_db=tuple(gains))
-        self.custom = replace(self.settings, enabled=False)
-        self.mark_custom()
-        self.schedule_write()
+        self.settings = replace(self.settings, gains_db=tuple(gains))
+        self.mark_edited()
+        self.record_audio_edit(before)
 
     def mark_custom(self):
         self.preset.blockSignals(True)
@@ -394,15 +898,57 @@ class Window(QMainWindow):
 
     def choose_preset(self, index: int):
         name = self.preset.itemData(index)
-        if not name:
+        if not name or name == self.settings.preset_id:
             return
+        before = self.audio_state()
+        if self.preset_dirty and self._current_user_id():
+            current = self.user_presets[self.settings.preset_id]["name"]
+            dialog = make_dialog(
+                self, "Несохранённые изменения",
+                f"Пресет «{current}» изменён. Сохранить изменения перед переключением?",
+                QMessageBox.Icon.Question,
+            )
+            dialog.setStandardButtons(
+                QMessageBox.StandardButton.Save |
+                QMessageBox.StandardButton.Discard |
+                QMessageBox.StandardButton.Cancel
+            )
+            dialog.setDefaultButton(QMessageBox.StandardButton.Save)
+            dialog.button(QMessageBox.StandardButton.Save).setText("Сохранить")
+            dialog.button(QMessageBox.StandardButton.Discard).setText("Не сохранять")
+            dialog.button(QMessageBox.StandardButton.Cancel).setText("Отмена")
+            answer = dialog.exec()
+            if answer == QMessageBox.StandardButton.Save:
+                if not self.update_user_preset():
+                    self.refresh_preset_items(self.settings.preset_id)
+                    return
+            elif answer != QMessageBox.StandardButton.Discard:
+                self.refresh_preset_items(self.settings.preset_id)
+                return
         if name == "CUSTOM":
-            self.settings = replace(self.custom, enabled=self.settings.enabled)
+            self.settings = replace(
+                self.custom, enabled=self.settings.enabled,
+                preamp_intensity=self.settings.preamp_intensity,
+                band_intensities=self.settings.band_intensities,
+            )
+        elif name in self.user_presets:
+            # Restore the whole saved sound, including all 11 multipliers.
+            self.settings = profiles.preset_settings(
+                self.user_presets[name], name, self.settings.enabled,
+            )
         else:
-            self.settings = preset_settings(self.library, name, enabled=self.settings.enabled)
+            # Built-in presets keep the user's current multiplier choices.
+            self.settings = replace(
+                preset_settings(self.library, name, enabled=self.settings.enabled),
+                preamp_intensity=self.settings.preamp_intensity,
+                band_intensities=self.settings.band_intensities,
+            )
         self.preamp.set_value(self.settings.preamp_linear)
         for widget, value in zip(self.bands, self.settings.gains_db):
             widget.set_value(value)
+        self.reflect_intensity_widgets()
+        self.sync_preset_dirty()
+        self.record_audio_edit(before)
         self.schedule_write()
 
     def commit_settings(self):
