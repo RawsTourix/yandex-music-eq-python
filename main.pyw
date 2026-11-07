@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import os
-import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, Signal, QProcess
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QHBoxLayout, QLabel, QMainWindow,
-    QMessageBox, QPushButton, QVBoxLayout, QWidget,
+    QMessageBox, QPushButton, QVBoxLayout, QWidget, QPlainTextEdit,
 )
 
 import apo
@@ -148,7 +148,7 @@ class Window(QMainWindow):
             QMessageBox.warning(self, "Некорректные настройки", f"{exc}\nЗакройте приложение и исправьте settings.json.")
             raise
         self.setWindowTitle("Yandex Music EQ — independent")
-        self.setFixedSize(463, 376)
+        self.setFixedSize(463, 480)
         self.setStyleSheet("""
             QMainWindow, QWidget#root { background: #1a1a1a; }
             QLabel { color: #dedede; font-family: 'Segoe UI'; }
@@ -216,24 +216,66 @@ class Window(QMainWindow):
         self.setup_button.clicked.connect(self.setup_apo)
         bottom.addWidget(self.setup_button)
         layout.addLayout(bottom)
+        self.messages = QPlainTextEdit()
+        self.messages.setReadOnly(True)
+        self.messages.setFixedHeight(75)
+        self.messages.setPlaceholderText("Сообщения подключения и ошибки аудиодвижка")
+        self.messages.setMaximumBlockCount(100)
+        self.messages.setStyleSheet("""
+            QPlainTextEdit { color: #c8c8c8; background: #252525;
+                             border: 1px solid #3c3c3c; border-radius: 7px;
+                             padding: 6px; font-size: 11px; }
+        """)
+        layout.addWidget(self.messages)
         layout.addStretch(1)
         self.write_timer = QTimer(self)
         self.write_timer.setSingleShot(True)
         self.write_timer.timeout.connect(self.commit_settings)
         self.connected = False
+        self.setup_process = None
         self.connection_timer = QTimer(self)
         self.connection_timer.timeout.connect(self.check_connection)
         self.connection_timer.start(2000)
         self.check_connection()
+        QTimer.singleShot(250, self.startup_check)
+
+    def report(self, message: str):
+        """Show diagnostics in the window rather than in a hidden console."""
+        if message and (not self.messages.toPlainText().splitlines() or
+                        self.messages.toPlainText().splitlines()[-1] != message):
+            self.messages.appendPlainText(message)
 
     def check_connection(self):
-        connected = apo.is_connected()
+        connected, reason = apo.connection_status()
         if connected != self.connected:
             self.connected = connected
             if connected:
                 self.schedule_write()
-        self.status.setText("APO: файл подключён" if connected else "APO: не подключён")
-        self.setup_button.setVisible(not connected and os.name == "nt")
+        self.status.setText("APO: конфигурация OK" if connected else "APO: не подключён")
+        self.setup_button.setVisible(os.name == "nt" and self.setup_process is None)
+
+    def startup_check(self):
+        if os.name != "nt":
+            self.report("Системная обработка доступна только в Windows")
+            return
+        if apo.config_directory() is None:
+            self.report("Equalizer APO не обнаружен. Сначала установите его и выберите устройство в Configurator")
+            return
+        if not self.connected:
+            self.report(apo.connection_status()[1])
+            self.report("Для подключения Equalizer APO требуется однократное подтверждение UAC")
+            self.setup_apo()
+            return
+        # The include being present does not imply permission to update it.
+        # Test the actual write without claiming that audio is already processed.
+        try:
+            if not apo.apply(self.settings, self.library):
+                raise OSError("Подключение Include не найдено")
+        except OSError as exc:
+            self.report(f"Нет доступа к конфигурации APO: {exc}")
+            self.setup_apo()
+            return
+        self.report("Конфигурация APO записана. Если звук не меняется, проверьте устройство в Configurator и перезагрузите Windows")
 
     def schedule_write(self):
         self.write_timer.start(160)
@@ -277,24 +319,74 @@ class Window(QMainWindow):
     def commit_settings(self):
         try:
             save_settings(self.settings, SETTINGS_FILE, self.custom)
-            if self.connected:
-                apo.apply(self.settings, self.library)
-        except OSError as exc:
-            self.status.setText(f"Ошибка записи: {exc}")
+        except (OSError, ValueError) as exc:
+            self.report(f"Ошибка сохранения settings.json: {exc}")
+            return
+        if not self.connected:
+            return
+        try:
+            if not apo.apply(self.settings, self.library):
+                self.connected = False
+                self.report("APO перестал быть подключён: проверьте config.txt и кнопку «Подключить APO»")
+        except (OSError, ValueError) as exc:
+            self.report(f"Эквализация не применяется: ошибка записи в APO: {exc}")
 
     def setup_apo(self):
         if os.name != "nt":
-            QMessageBox.information(self, "Windows", "Equalizer APO поддерживается только в Windows.")
+            self.report("Equalizer APO работает только в Windows")
+            return
+        if self.setup_process is not None:
+            return
+        if apo.config_directory() is None:
+            self.report("Не найдена установка Equalizer APO. Установите его и проверьте Configurator")
             return
         interpreter = Path(sys.executable)
         if interpreter.name.lower() == "pythonw.exe":
-            alternative = interpreter.with_name("python.exe")
-            if alternative.is_file():
-                interpreter = alternative
-        try:
-            subprocess.Popen([str(interpreter), str(Path(__file__).with_name("setup_apo.py"))])
-        except OSError as exc:
-            QMessageBox.critical(self, "Ошибка запуска настройки", str(exc))
+            candidate = interpreter.with_name("python.exe")
+            if candidate.exists():
+                interpreter = candidate
+        process = QProcess(self)
+        process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        process.setProgram(str(interpreter))
+        process.setArguments([str(Path(__file__).with_name("setup_apo.py"))])
+        process.finished.connect(self.setup_finished)
+        process.errorOccurred.connect(self.setup_process_error)
+        self.setup_process = process
+        self.setup_button.setEnabled(False)
+        self.setup_button.setText("Подключение...")
+        self.report("Настройка Equalizer APO: подтвердите запрос прав администратора Windows...")
+        process.start()
+
+    def setup_process_error(self, error):
+        if self.setup_process is not None:
+            self.report(f"Не удалось запустить установщик APO: {self.setup_process.errorString()}")
+
+    def setup_finished(self, exit_code, exit_status):
+        process = self.setup_process
+        if process is None:
+            return
+        output = bytes(process.readAllStandardOutput()).decode("utf-8", "replace").strip()
+        message = output or f"Установщик APO завершился без отчёта (код {exit_code})"
+        success = False
+        for line in reversed(output.splitlines()):
+            try:
+                result = json.loads(line)
+                message = result.get("message", message)
+                success = bool(result.get("ok")) and exit_code == 0
+                break
+            except (ValueError, TypeError, AttributeError):
+                continue
+        self.setup_process = None
+        process.deleteLater()
+        self.setup_button.setEnabled(True)
+        self.setup_button.setText("Подключить APO")
+        self.check_connection()
+        self.report(message)
+        if success and self.connected:
+            self.commit_settings()
+            self.report("Файл фильтров обновлён. В Configurator должно быть включено нужное устройство вывода")
+        elif success:
+            self.report("Установщик сообщил об успехе, но Include не обнаружен. Проверьте config.txt")
 
     def closeEvent(self, event):
         if self.write_timer.isActive():
