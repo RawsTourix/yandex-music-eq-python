@@ -14,13 +14,16 @@ from PySide6.QtGui import QColor, QFont, QPainter, QPen, QShortcut, QKeySequence
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QHBoxLayout, QLabel, QMainWindow,
     QMessageBox, QPushButton, QVBoxLayout, QWidget, QPlainTextEdit,
-    QToolButton, QMenu, QInputDialog, QFileDialog,
+    QToolButton, QMenu, QInputDialog, QFileDialog, QSystemTrayIcon,
 )
 
 import apo
 import installer
 import device_status
 import user_presets as profiles
+import lifecycle
+from single_instance import ActivationEvent, InstanceError, WindowsInstanceMutex, notify_running_instance
+from tray_ui import TrayController
 from history import AudioState, EditHistory
 from equalizer import (
     INTENSITIES, SETTINGS_FILE, Settings, load_custom, load_library,
@@ -381,7 +384,76 @@ class Window(QMainWindow):
         self.connection_timer.timeout.connect(self.check_connection)
         self.connection_timer.start(2000)
         self.check_connection()
+        self._exit_completed = False
+        self.tray_controller = None
+        app = QApplication.instance()
+        if app.platformName().lower() != "offscreen" and QSystemTrayIcon.isSystemTrayAvailable():
+            self.tray_controller = TrayController(self)
+            app.setQuitOnLastWindowClosed(False)
         QTimer.singleShot(250, self.startup_check)
+
+    def show_window(self):
+        """Show the one existing window instead of creating another process."""
+        if self.isMinimized():
+            self.showNormal()
+        else:
+            self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def refresh_tray(self):
+        if self.tray_controller is not None:
+            self.tray_controller.refresh()
+
+    def request_exit(self):
+        """Quit deliberately only after Equalizer APO has been disabled."""
+        if self._exit_completed:
+            return True
+        if self.install_worker is not None or self.setup_process is not None:
+            self.show_window()
+            make_dialog(
+                self, "Завершение ещё недоступно",
+                "Сначала дождитесь завершения установки или настройки Equalizer APO.",
+                QMessageBox.Icon.Warning,
+            ).exec()
+            return False
+        self.write_timer.stop()
+        self.connection_timer.stop()
+        try:
+            disabled = lifecycle.disable_and_persist(
+                self.settings, self.custom, self.library,
+            )
+        except (lifecycle.ShutdownError, OSError, ValueError) as exc:
+            self.connection_timer.start(2000)
+            self.report(str(exc))
+            self.show_window()
+            make_dialog(
+                self, "Эквалайзер не выключен",
+                str(exc) + "\n\nПрограмма останется запущенной. "
+                "Исправьте доступ к Equalizer APO и повторите выход.",
+                QMessageBox.Icon.Warning,
+            ).exec()
+            return False
+        self.settings = disabled
+        self.switch.set_checked(False)
+        self._exit_completed = True
+        self.refresh_tray()
+        if self.tray_controller is not None:
+            self.tray_controller.hide()
+        QTimer.singleShot(0, QApplication.instance().quit)
+        return True
+
+    def best_effort_stop_on_quit(self):
+        """Handles unexpected normal Qt quit; hard kills cannot be intercepted."""
+        if self._exit_completed:
+            return
+        try:
+            self.settings = lifecycle.disable_and_persist(
+                self.settings, self.custom, self.library,
+            )
+            self._exit_completed = True
+        except (lifecycle.ShutdownError, OSError, ValueError) as exc:
+            self.report("Не удалось отключить APO перед выходом: " + str(exc))
 
     def refresh_preset_items(self, select_id: str):
         """Rebuild the list without changing the active audio settings."""
@@ -479,6 +551,7 @@ class Window(QMainWindow):
         finally:
             self._restoring_history = False
         self.schedule_write()
+        self.refresh_tray()
 
     def undo_edit(self):
         if self._slider_drag_before is not None:
@@ -799,6 +872,7 @@ class Window(QMainWindow):
         self.settings = replace(self.settings, enabled=enabled)
         self.record_audio_edit(before)
         self.schedule_write()
+        self.refresh_tray()
 
     @staticmethod
     def slider_column(slider: BandSlider, control: QToolButton) -> QVBoxLayout:
@@ -950,6 +1024,7 @@ class Window(QMainWindow):
         self.sync_preset_dirty()
         self.record_audio_edit(before)
         self.schedule_write()
+        self.refresh_tray()
 
     def commit_settings(self):
         try:
@@ -1127,19 +1202,73 @@ class Window(QMainWindow):
             self.report("Установщик сообщил об успехе, но Include не обнаружен. Проверьте config.txt")
 
     def closeEvent(self, event):
-        if self.write_timer.isActive():
-            self.write_timer.stop()
-            self.commit_settings()
-        super().closeEvent(event)
+        if self._exit_completed:
+            event.accept()
+            return
+        if self.tray_controller is not None and self.tray_controller.icon.isVisible():
+            # The APO keeps processing while the GUI is hidden.
+            if self.write_timer.isActive():
+                self.write_timer.stop()
+                self.commit_settings()
+            event.ignore()
+            self.hide()
+            return
+        # When no system tray is available, closing the sole window must
+        # perform a proper shutdown rather than strand filters in the APO.
+        # Headless smoke tests do not run an application event loop.
+        if QApplication.instance().platformName().lower() == "offscreen":
+            super().closeEvent(event)
+            return
+        if self.request_exit():
+            event.accept()
+        else:
+            event.ignore()
 
 
 def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-    window = Window()
-    window.show()
-    sys.exit(app.exec())
+    mutex = WindowsInstanceMutex()
+    try:
+        first = mutex.acquire()
+    except InstanceError as exc:
+        QMessageBox.critical(None, "Ошибка запуска эквалайзера", str(exc))
+        return 1
+    if not first:
+        if not notify_running_instance():
+            QMessageBox.information(
+                None, "Эквалайзер уже запущен",
+                "Программа уже работает. Откройте её через значок в области "
+                "уведомлений Windows (в том числе «Отображать скрытые значки»).",
+            )
+        return 0
+
+    activation = ActivationEvent()
+    try:
+        activation.create()
+    except InstanceError as exc:
+        mutex.release()
+        QMessageBox.critical(None, "Ошибка запуска эквалайзера", str(exc))
+        return 1
+    try:
+        window = Window()
+        activation_timer = QTimer(window)
+        def poll_activation():
+            try:
+                if activation.consume():
+                    window.show_window()
+            except InstanceError as exc:
+                activation_timer.stop()
+                window.report(str(exc))
+        activation_timer.timeout.connect(poll_activation)
+        activation_timer.start(200)
+        app.aboutToQuit.connect(window.best_effort_stop_on_quit)
+        window.show()
+        return app.exec()
+    finally:
+        activation.close()
+        mutex.release()
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

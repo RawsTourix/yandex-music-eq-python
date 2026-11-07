@@ -51,6 +51,27 @@ The program keeps a bounded history of the last **100 sound edits**. **Ctrl+Z** 
 
 User presets save the linear preamp, ten gains in dB, one preamp multiplier, and ten band multipliers. The EQ on/off switch is intentionally *not* part of a preset and retains its current global state. The local user-preset collection and exported `.yeq.json` files are ignored by Git; **back up or copy your exported preset files to preserve them across computers or reinstallations**. An older `settings.json` remains valid, and if a selected user profile is deleted outside the app, the live audio settings are retained as Custom.
 
+## System tray, shutdown, and single instance (experimental)
+
+On a normal Windows desktop with a system notification area, pressing the window's **X** silently hides the GUI to the notification area (the icon may appear under **«Отображать скрытые значки»**, depending on Windows settings). **No pop-up or balloon notification is displayed when hiding. Closing the window does not turn off or stop the current equalization.** Click/double-click the yellow/grey tray icon to show the **same existing window**; no new EQ process is launched.
+
+Right-click the tray icon to access:
+
+- **Показать эквалайзер** — restore the GUI;
+- **Эквалайзер включён / выключен** — toggle DSP without opening the window;
+- **Выбрать пресет** — apply any built-in or saved user preset, including its eleven intensity multipliers; unsaved user-preset changes prompt for Save/Discard/Cancel in the restored window;
+- **Отменить / Повторить** — clickable menu commands that undo or redo recent audio changes; keyboard shortcuts are available only in the focused main window;
+- **Настроить аудиоустройство…** — open the window and Equalizer APO device configuration;
+- **Выход** — fully shut down the program **after writing a disabled config** to Equalizer APO and saving `enabled: false` in `settings.json`.
+
+**Important:** Equalizer APO processes audio outside the Python program and normally retains the last written configuration even if the GUI disappears. Therefore **full exit explicitly writes disabled processing**, preserving all ten band settings, multipliers, saved user presets and other settings for later use. If the APO config cannot be updated, exit is blocked and the user receives a visible error. There is no silent force-exit. When the tray is unavailable, closing the only window performs a normal safe shutdown instead of hiding an inaccessible process.
+
+Only **one instance is permitted per interactive Windows session** using a named OS mutex. Launching `main.pyw` again does not open a duplicate: a named Win32 auto-reset event signals the existing instance to restore its window (checked by a lightweight Qt timer). If the first instance has not yet created the event, the second launch retries briefly; if signalling remains unavailable, it exits and explains how to find the tray icon.
+
+**Shortcut scope:** `Ctrl+Z` and `Ctrl+Y` are regular **window-local** Qt shortcuts, not global Windows hotkeys. When the GUI is hidden or another application is focused, those keys belong to that other application and do **not** change the EQ. To undo or redo without opening the GUI, right-click the tray icon and click **Отменить** or **Повторить**. Showing keyboard hints in the tray menu would imply that these combinations work globally, so the tray menu deliberately omits them. No keyboard hook or global shortcut registration is installed.
+
+A normal Qt shutdown includes best-effort cleanup. **Force-killing the process, an OS crash or loss of power cannot guarantee cleanup** because Equalizer APO is in the Windows audio service. The system tray location (visible icons versus the hidden-icons flyout) is determined by Windows, not by this application. The tray icon/menu are not auto-start services; they exist only while the Python program runs.
+
 ## Run on Windows 10/11
 
 Requires **Python 3.10+**. Equalizer APO must be enabled for your playback device in its Device Selector; it can be installed directly from this application's first-run prompt on **Windows x64**. A Windows restart may be required.
@@ -68,7 +89,7 @@ Run `py main.pyw` instead if you want to see Python errors in a terminal.
 2. **In the vendor's Device Selector, select the actual playback device**, then complete installation and restart Windows if requested. The program cannot reliably perform this hardware choice for you. Relaunch `main.pyw` after installation/restart. If Equalizer APO is found but is not connected (or its managed file is not writable), the app **automatically requests UAC once** to perform setup. You can also click **«Подключить APO»** to retry. Alternatively, from PowerShell run `py setup_apo.py`.
 3. Approve the **Windows UAC** prompt. The setup helper creates `EqualizerAPO/config/yandex-music-eq.txt`, appends a scoped `Device: all`, `Stage: post-mix`, `Channel: all` block with `Include: yandex-music-eq.txt` to `config.txt`, and grants **your Windows account Modify permission on the generated file only**. It backs up `config.txt` before the first modification and does not remove other filters. You should inspect any existing filters in Equalizer APO's Configuration Editor so they do not stack unexpectedly.
 4. The GUI checks **two independent things**: our `Include` configuration and the Equalizer APO **post-mix registration on the current default playback endpoint** (using a read-only Windows registry check and Qt Multimedia's default device ID). If the Device Selector was cancelled, the status stays **«APO: выберите устройство»** rather than falsely reporting OK. The **«Настроить устройство»** button stays visible even after the include is connected; it opens the vendor's Device Selector for the user to tick the correct device and confirm OK. If the endpoint ID cannot be matched, the status is explicitly **«APO: устройство не проверено»**. Even **«APO: регистрация найдена»** is not confirmation of active sound processing: verify with the vendor's Device Selector test or by measuring/listening to output. The diagnostic textbox shows each transition and setup errors.
-5. Toggle the EQ on, adjust bands, and verify the result with music or a test tone using a normal shared-mode Windows audio device. Changes are written automatically after a short pause; closing the GUI does not disable the last selected EQ state.
+5. Toggle the EQ on, adjust bands, and verify the result with music or a test tone using a normal shared-mode Windows audio device. Changes are written automatically after a short pause; closing the GUI hides it to the system tray; use the tray **Exit** command to disable processing.
 
 If the UI says **«конфигурация OK»** but sound still does not change, open **Equalizer APO Configurator**, select the actual Windows playback endpoint (e.g. your USB DAC, not another output), install the APO for that device, and restart Windows if prompted. Check that sound is using shared mode rather than ASIO/WASAPI Exclusive. A UAC prompt only grants permission to configure files; it cannot install the audio-processing endpoint in your place.
 
@@ -113,5 +134,5 @@ These cover preset validation, config generation, IIR biquad response at referen
 ## Safety / recovery
 
 - Before trying, turn your listening volume down; positive gains can clip and sound louder than expected.
-- To bypass this application's audio processing, **turn off the switch** in the GUI. If the GUI is unavailable, comment out `Include: yandex-music-eq.txt` in Equalizer APO's `config.txt`, or remove the managed text file using Administrator permissions.
+- To bypass this application's audio processing, **turn off the switch** in the GUI or from the tray. **Full Exit** also writes an off configuration. If the process has crashed or been force-killed, the last written Equalizer APO filters might remain active: manually comment out `Include: yandex-music-eq.txt` in Equalizer APO's `config.txt` or remove the managed text file with appropriate permissions.
 - If installation interfered with other Equalizer APO settings, restore the timestamped `config.txt.before-yandex-eq-*.bak` file created by setup. The helper changes only one include line and creates the managed file.
