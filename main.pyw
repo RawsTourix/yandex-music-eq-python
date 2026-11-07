@@ -354,6 +354,258 @@ class Window(QMainWindow):
         self.check_connection()
         QTimer.singleShot(250, self.startup_check)
 
+    def refresh_preset_items(self, select_id: str):
+        """Rebuild the list without changing the active audio settings."""
+        was_blocked = self.preset.blockSignals(True)
+        try:
+            self.preset.clear()
+            self.preset.addItem("Своя настройка", "CUSTOM")
+            self.preset.addItem("По умолчанию", "DEFAULT")
+            for preset_id in self.library["presets"]:
+                if preset_id not in ("CUSTOM", "DEFAULT"):
+                    self.preset.addItem(preset_id.replace("_", " ").title(), preset_id)
+            if self.user_presets:
+                self.preset.insertSeparator(self.preset.count())
+                for preset_id, record in self.user_presets.items():
+                    self.preset.addItem("★ " + record["name"], preset_id)
+            index = self.preset.findData(select_id)
+            self.preset.setCurrentIndex(index if index >= 0 else self.preset.findData("CUSTOM"))
+        finally:
+            self.preset.blockSignals(was_blocked)
+
+    def _current_user_id(self) -> str | None:
+        selected = self.settings.preset_id
+        return selected if selected in self.user_presets else None
+
+    def set_preset_dirty(self, dirty: bool):
+        self.preset_dirty = dirty
+        self.preset_save_button.setText("Сохранить*" if dirty else "Сохранить")
+        self.preset_save_button.setToolTip(
+            "Сохранить изменения в выбранном пользовательском пресете"
+            if self._current_user_id() else
+            "Сохранить текущие ползунки и все множители под новым названием"
+        )
+
+    def update_preset_actions(self):
+        available = self._current_user_id() is not None
+        for action in (self.action_update, self.action_rename, self.action_delete):
+            action.setEnabled(available)
+
+    def _preset_error(self, title: str, exception: Exception):
+        message = str(exception)
+        self.report(f"{title}: {message}")
+        make_dialog(self, title, message, QMessageBox.Icon.Warning).exec()
+
+    def _ask_preset_name(self, title: str, initial: str) -> str | None:
+        dialog = QInputDialog(self)
+        dialog.setWindowTitle(title)
+        dialog.setLabelText("Название пресета:")
+        dialog.setTextValue(initial)
+        dialog.setOkButtonText("Сохранить")
+        dialog.setCancelButtonText("Отмена")
+        dialog.setStyleSheet("""
+            QInputDialog { background: #1a1a1a; }
+            QInputDialog QLabel { color: #eeeeee; font: 12px 'Segoe UI'; }
+            QInputDialog QLineEdit {
+                color: #eeeeee; background: #292929;
+                border: 1px solid #666666; padding: 6px;
+            }
+            QInputDialog QPushButton {
+                color: #eeeeee; background: #323232; border: 1px solid #666666;
+                border-radius: 5px; padding: 5px 12px;
+            }
+        """)
+        if dialog.exec() != QInputDialog.DialogCode.Accepted:
+            return None
+        return dialog.textValue()
+
+    def _write_profiles(self, updated: dict[str, dict]) -> bool:
+        try:
+            profiles.save_user_presets(
+                updated, frequencies=self.library["frequenciesHz"]
+            )
+        except (OSError, ValueError) as exc:
+            self._preset_error("Не удалось сохранить пресеты", exc)
+            return False
+        self.user_presets = updated
+        return True
+
+    def save_current_preset(self):
+        if self._current_user_id():
+            self.update_user_preset()
+        else:
+            self.save_preset_as()
+
+    def save_preset_as(self):
+        selected = self._current_user_id()
+        default = self.user_presets[selected]["name"] + " (копия)" if selected else "Мой пресет"
+        name = self._ask_preset_name("Сохранить новый пресет", default)
+        if name is None:
+            return False
+        try:
+            name = profiles.ensure_unique_name(self.user_presets, name)
+            record = profiles.snapshot(self.settings, name)
+            new_id = profiles.new_preset_id()
+            updated = dict(self.user_presets)
+            if len(updated) >= profiles.MAX_PRESETS:
+                raise profiles.UserPresetError("Достигнут предел в 200 пользовательских пресетов")
+            updated[new_id] = record
+        except (ValueError, TypeError) as exc:
+            self._preset_error("Некорректный пресет", exc)
+            return False
+        if not self._write_profiles(updated):
+            return False
+        self.settings = replace(self.settings, preset_id=new_id)
+        self.refresh_preset_items(new_id)
+        self.set_preset_dirty(False)
+        self.commit_settings()
+        self.report(f"Сохранён пользовательский пресет «{name}» со всеми 11 множителями.")
+        return True
+
+    def update_user_preset(self):
+        preset_id = self._current_user_id()
+        if preset_id is None:
+            self.report("Выберите пользовательский пресет или используйте «Сохранить как…».")
+            return False
+        name = self.user_presets[preset_id]["name"]
+        try:
+            record = profiles.snapshot(self.settings, name)
+        except (ValueError, TypeError) as exc:
+            self._preset_error("Некорректные параметры пресета", exc)
+            return False
+        updated = dict(self.user_presets)
+        updated[preset_id] = record
+        if not self._write_profiles(updated):
+            return False
+        self.set_preset_dirty(False)
+        self.commit_settings()
+        self.report(f"Пресет «{name}» обновлён.")
+        return True
+
+    def rename_user_preset(self):
+        preset_id = self._current_user_id()
+        if preset_id is None:
+            return
+        current = self.user_presets[preset_id]
+        name = self._ask_preset_name("Переименовать пресет", current["name"])
+        if name is None:
+            return
+        try:
+            name = profiles.ensure_unique_name(self.user_presets, name, ignore_id=preset_id)
+        except ValueError as exc:
+            self._preset_error("Не удалось переименовать пресет", exc)
+            return
+        updated = dict(self.user_presets)
+        updated[preset_id] = {**current, "name": name}
+        if self._write_profiles(updated):
+            self.refresh_preset_items(preset_id)
+            self.report(f"Пресет переименован в «{name}».")
+
+    def delete_user_preset(self):
+        preset_id = self._current_user_id()
+        if preset_id is None:
+            return
+        name = self.user_presets[preset_id]["name"]
+        dialog = make_dialog(
+            self, "Удалить пресет?",
+            f"Удалить пользовательский пресет «{name}»?\n"
+            "Текущие настройки звука останутся в режиме «Своя настройка».",
+            QMessageBox.Icon.Warning,
+        )
+        dialog.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        dialog.setDefaultButton(QMessageBox.StandardButton.No)
+        dialog.button(QMessageBox.StandardButton.Yes).setText("Удалить")
+        dialog.button(QMessageBox.StandardButton.No).setText("Отмена")
+        if dialog.exec() != QMessageBox.StandardButton.Yes:
+            return
+        updated = dict(self.user_presets)
+        del updated[preset_id]
+        if not self._write_profiles(updated):
+            return
+        self.settings = replace(self.settings, preset_id="CUSTOM")
+        self.custom = replace(self.settings, enabled=False)
+        self.refresh_preset_items("CUSTOM")
+        self.set_preset_dirty(False)
+        self.commit_settings()
+        self.report(f"Пресет «{name}» удалён. Текущий звук сохранён.")
+
+    def export_current_preset(self):
+        preset_id = self._current_user_id()
+        if preset_id:
+            name = self.user_presets[preset_id]["name"]
+        else:
+            name = self.preset.currentText() or "Мой пресет"
+        safe_name = "".join(
+            char for char in name if char not in '\\/:*?"<>|' and ord(char) >= 32
+        )[:48].strip(" .") or "preset"
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Экспортировать настройку эквалайзера",
+            str(Path(__file__).resolve().parent / f"{safe_name}.yeq.json"),
+            "Пресет эквалайзера (*.yeq.json);;JSON (*.json)",
+        )
+        if not filename:
+            return
+        path = Path(filename)
+        if path.suffix.lower() != ".json":
+            path = path.with_name(path.name + ".yeq.json")
+        try:
+            profiles.export_preset(profiles.snapshot(self.settings, name), path)
+        except (OSError, ValueError, TypeError) as exc:
+            self._preset_error("Ошибка экспорта", exc)
+            return
+        self.report(f"Пресет экспортирован: {path}")
+
+    def import_user_preset(self):
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Импортировать пресет эквалайзера",
+            str(Path(__file__).resolve().parent),
+            "Пресет эквалайзера (*.yeq.json *.json)",
+        )
+        if not filename:
+            return
+        try:
+            record = profiles.import_preset(Path(filename))
+            name = record["name"]
+            try:
+                profiles.ensure_unique_name(self.user_presets, name)
+            except profiles.UserPresetError:
+                requested = self._ask_preset_name(
+                    "Такое название уже есть — укажите новое", name + " (импорт)"
+                )
+                if requested is None:
+                    return
+                name = profiles.ensure_unique_name(self.user_presets, requested)
+                record = {**record, "name": name}
+            updated = dict(self.user_presets)
+            if len(updated) >= profiles.MAX_PRESETS:
+                raise profiles.UserPresetError("Достигнут предел в 200 пользовательских пресетов")
+            new_id = profiles.new_preset_id()
+            updated[new_id] = record
+        except (OSError, ValueError, TypeError) as exc:
+            self._preset_error("Ошибка импорта", exc)
+            return
+        if not self._write_profiles(updated):
+            return
+        # Import only registers a preset. Do not unexpectedly replace live audio.
+        self.refresh_preset_items(self.settings.preset_id)
+        self.report(f"Пресет «{name}» импортирован. Выберите его в списке для применения.")
+
+    def reflect_intensity_widgets(self):
+        pairs = [(self.preamp_intensity_button, self.settings.preamp_intensity, "предусиление")]
+        pairs.extend(
+            (button, value, f"{FREQUENCY_LABELS[index]} Гц")
+            for index, (button, value) in enumerate(
+                zip(self.band_intensity_buttons, self.settings.band_intensities)
+            )
+        )
+        for button, value, label in pairs:
+            button.setText(INTENSITY_LABELS[value])
+            button.setToolTip(f"Интенсивность {label}: ×{value:g}. Нажмите для выбора.")
+            for action in button.menu().actions():
+                action.setChecked(action.data() == value)
+
     def report(self, message: str):
         """Show diagnostics in the window rather than in a hidden console."""
         if message and (not self.messages.toPlainText().splitlines() or
