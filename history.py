@@ -65,6 +65,18 @@ class EditHistory:
             del self._undo[:len(self._undo) - self.capacity]
         return self._redo.pop()
 
+    def discard_latest(self, expected_before: AudioState) -> bool:
+        """Coalesce a first mouse click with its following double-click reset.
+
+        Only discard if the previous recorded state's origin still matches.
+        An unrelated user action must never be removed from the history.
+        """
+        if not self._undo or self._undo[-1] != expected_before:
+            return False
+        self._undo.pop()
+        self._redo.clear()
+        return True
+
     def clear(self) -> None:
         self._undo.clear()
         self._redo.clear()
