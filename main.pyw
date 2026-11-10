@@ -72,6 +72,7 @@ class BandSlider(QWidget):
     value_changed = Signal(float)
     edit_started = Signal()
     edit_finished = Signal()
+    reset_requested = Signal()
 
     def __init__(self, label: str, minimum: float, maximum: float, value: float, width: int = 31):
         super().__init__()
@@ -81,7 +82,7 @@ class BandSlider(QWidget):
         self.setFixedSize(width, 206)
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setToolTip(f"{label}: {value:.1f}")
+        self.setToolTip(f"{label}: {value:.1f}\nДвойной щелчок — нейтральное значение")
 
     def y_for(self, value: float) -> float:
         return 12 + (self.maximum - value) / (self.maximum - self.minimum) * 157
@@ -90,7 +91,7 @@ class BandSlider(QWidget):
         value = round(max(self.minimum, min(self.maximum, value)), 1)
         if value != self.value:
             self.value = value
-            self.setToolTip(f"{self.label}: {value:.1f}")
+            self.setToolTip(f"{self.label}: {value:.1f}\nДвойной щелчок — нейтральное значение")
             self.update()
             if emit:
                 self.value_changed.emit(value)
@@ -109,6 +110,13 @@ class BandSlider(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             self.edit_finished.emit()
             event.accept()
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.reset_requested.emit()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
 
     def mouseMoveEvent(self, event):
         if event.buttons() & Qt.MouseButton.LeftButton:
@@ -257,6 +265,7 @@ class Window(QMainWindow):
         self.preamp.value_changed.connect(self.edit_preamp)
         self.preamp.edit_started.connect(self.begin_slider_edit)
         self.preamp.edit_finished.connect(self.end_slider_edit)
+        self.preamp.reset_requested.connect(lambda: self.reset_slider(None))
         self.preamp_intensity_button = self.make_intensity_button(
             None, "предусиление", self.settings.preamp_intensity, 51,
         )
@@ -271,6 +280,7 @@ class Window(QMainWindow):
             slider.value_changed.connect(lambda value, i=index: self.edit_band(i, value))
             slider.edit_started.connect(self.begin_slider_edit)
             slider.edit_finished.connect(self.end_slider_edit)
+            slider.reset_requested.connect(lambda i=index: self.reset_slider(i))
             button = self.make_intensity_button(
                 index, f"{name} Гц", self.settings.band_intensities[index], 31,
             )
@@ -334,6 +344,7 @@ class Window(QMainWindow):
         layout.addLayout(preset_row)
         self.history = EditHistory(capacity=100)
         self._slider_drag_before: AudioState | None = None
+        self._last_slider_click = None
         self._restoring_history = False
         self.shortcuts = []
         for combination, handler in (
@@ -533,8 +544,36 @@ class Window(QMainWindow):
             return
         before = self._slider_drag_before
         self._slider_drag_before = None
-        self.history.record(before, self.audio_state())
+        after = self.audio_state()
+        recorded = self.history.record(before, after)
+        source = self.sender()
+        if recorded and isinstance(source, BandSlider):
+            # The first press/release is generated before Qt delivers the
+            # double-click event. Remember it so reset + initial click become
+            # a single undoable action.
+            self._last_slider_click = (source, before, after, self.history.undo_count)
+        else:
+            self._last_slider_click = None
         self.update_history_actions()
+
+    def reset_slider(self, index: int | None):
+        """Double-click restores 1.0 preamp or 0 dB without resetting presets."""
+        widget = self.preamp if index is None else self.bands[index]
+        before = self.audio_state()
+        previous = self._last_slider_click
+        if (previous is not None
+                and previous[0] is widget
+                and previous[2] == before
+                and previous[3] == self.history.undo_count
+                and self.history.discard_latest(previous[1])):
+            before = previous[1]
+        self._last_slider_click = None
+        neutral = 1.0 if index is None else 0.0
+        # Reuse the regular change signal: APO, dirty marker and persistence
+        # follow exactly the same path as manual slider movement.
+        self._slider_drag_before = before
+        widget.set_value(neutral, emit=True)
+        self.end_slider_edit()
 
     def restore_audio_state(self, state: AudioState):
         """Restore the entire live sound without creating another history entry."""
